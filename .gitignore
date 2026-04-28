@@ -1,0 +1,5 @@
+# Local env files
+.env
+
+# Local backup stash
+BK/are-repo/
