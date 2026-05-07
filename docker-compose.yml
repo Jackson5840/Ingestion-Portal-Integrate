@@ -40,6 +40,7 @@ services:
       ARE_MYSQL_HOST: mysql
       ARE_MYSQL_USER: "${MYSQL_USER:-nmo}"
       ARE_MYSQL_PASSWORD: "${MYSQL_PASSWORD:-nmo}"
+      ARE_MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root}"
       ARE_MYSQL_DB: "${ARE_MYSQL_DB:-nmdbDev}"
       ARE_MYSQL_REVIEW_DB: "${ARE_MYSQL_REVIEW_DB:-nmdbDev}"
       ARE_MYSQL_MAIN_DB: "${ARE_MYSQL_MAIN_DB:-NeuMO}"
@@ -100,7 +101,7 @@ services:
     restart: unless-stopped
 
   mysql:
-    image: mysql:8.0
+    image: mysql:5.7
     environment:
       MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root}"
       MYSQL_USER: "${MYSQL_USER:-nmo}"

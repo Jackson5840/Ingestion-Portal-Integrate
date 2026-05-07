@@ -38,3 +38,7 @@ returns 404 even when the service is running. Use its concrete API routes such a
 `/clearcache`, `/getDuplicatesfordata/`, or `/similarNeurons/...`.
 
 Important: `similarity-search` is started with `SIS_INIT_ON_STARTUP=0` by default because the repository does not include the `.pkl` cache files referenced by its Dockerfile history, and a fresh MySQL container does not contain the NeuroMorpho schema/data it expects. Set it to `1` after loading the expected MySQL data or adding cache files.
+
+Note: this compose file uses `mysql:5.7`. If you previously started the stack with
+`mysql:8.0`, the existing `mysql-data` volume may not be compatible with 5.7. In
+that case, recreate the MySQL volume before starting the 5.7 container.

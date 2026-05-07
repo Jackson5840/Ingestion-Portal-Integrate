@@ -95,6 +95,8 @@ def exportdb():
 
     today = datetime.datetime.now().strftime('%Y-%m-%d')
     outputs = {}
+    mysql_dump_user = os.getenv('ARE_MYSQL_DUMP_USER', 'root')
+    mysql_dump_password = os.getenv('ARE_MYSQL_ROOT_PASSWORD', os.getenv('ARE_MYSQL_PASSWORD', ''))
 
     try:
         if 'mysql_review' in selected:
@@ -102,9 +104,10 @@ def exportdb():
             mysql_cmd = [
                 'mysqldump',
                 '--host', cfg.dbhost,
-                '--user', cfg.dbuser,
+                '--user', mysql_dump_user,
                 '--databases', cfg.dbselrev,
                 '--single-transaction',
+                '--column-statistics=0',
                 '--no-tablespaces',
                 '--routines',
                 '--events',
@@ -112,7 +115,7 @@ def exportdb():
                 '--set-gtid-purged=OFF',
             ]
             mysql_env = os.environ.copy()
-            mysql_env['MYSQL_PWD'] = cfg.dbpass
+            mysql_env['MYSQL_PWD'] = mysql_dump_password
             with open(mysql_review_output, 'w', encoding='utf-8') as handle:
                 subprocess.run(
                     mysql_cmd,
@@ -129,9 +132,10 @@ def exportdb():
             mysql_cmd = [
                 'mysqldump',
                 '--host', cfg.dbhost,
-                '--user', cfg.dbuser,
+                '--user', mysql_dump_user,
                 '--databases', cfg.dbselmain,
                 '--single-transaction',
+                '--column-statistics=0',
                 '--no-tablespaces',
                 '--routines',
                 '--events',
@@ -139,7 +143,7 @@ def exportdb():
                 '--set-gtid-purged=OFF',
             ]
             mysql_env = os.environ.copy()
-            mysql_env['MYSQL_PWD'] = cfg.dbpass
+            mysql_env['MYSQL_PWD'] = mysql_dump_password
             with open(mysql_main_output, 'w', encoding='utf-8') as handle:
                 subprocess.run(
                     mysql_cmd,
