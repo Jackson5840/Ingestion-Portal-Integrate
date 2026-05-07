@@ -8,6 +8,7 @@ import datetime
 import redis
 import time
 import logging
+import subprocess
 from are import cfg,io,com,utils,ingest,ingestdiameter
 #from IngestApp import Ingestion
 
@@ -82,6 +83,109 @@ def setstatus():
 def getarchives():
     result = io.getarchivecsv()
     return result
+
+
+@app.route('/exportdb/', methods=['GET'])
+def exportdb():
+    export_root = os.getenv('ARE_EXPORT_ROOT', '/home/kira/app/Ingestion/export')
+    os.makedirs(export_root, exist_ok=True)
+    selected = request.args.getlist('db')
+    if not selected:
+        selected = ['mysql_review', 'mysql_main', 'postgres']
+
+    today = datetime.datetime.now().strftime('%Y-%m-%d')
+    outputs = {}
+
+    try:
+        if 'mysql_review' in selected:
+            mysql_review_output = os.path.join(export_root, 'mysql_{}_{}.sql'.format(cfg.dbselrev, today))
+            mysql_cmd = [
+                'mysqldump',
+                '--host', cfg.dbhost,
+                '--user', cfg.dbuser,
+                '--databases', cfg.dbselrev,
+                '--single-transaction',
+                '--no-tablespaces',
+                '--routines',
+                '--events',
+                '--triggers',
+                '--set-gtid-purged=OFF',
+            ]
+            mysql_env = os.environ.copy()
+            mysql_env['MYSQL_PWD'] = cfg.dbpass
+            with open(mysql_review_output, 'w', encoding='utf-8') as handle:
+                subprocess.run(
+                    mysql_cmd,
+                    check=True,
+                    stdout=handle,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    env=mysql_env,
+                )
+            outputs['mysql_review'] = mysql_review_output
+
+        if 'mysql_main' in selected:
+            mysql_main_output = os.path.join(export_root, 'mysql_{}_{}.sql'.format(cfg.dbselmain, today))
+            mysql_cmd = [
+                'mysqldump',
+                '--host', cfg.dbhost,
+                '--user', cfg.dbuser,
+                '--databases', cfg.dbselmain,
+                '--single-transaction',
+                '--no-tablespaces',
+                '--routines',
+                '--events',
+                '--triggers',
+                '--set-gtid-purged=OFF',
+            ]
+            mysql_env = os.environ.copy()
+            mysql_env['MYSQL_PWD'] = cfg.dbpass
+            with open(mysql_main_output, 'w', encoding='utf-8') as handle:
+                subprocess.run(
+                    mysql_cmd,
+                    check=True,
+                    stdout=handle,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    env=mysql_env,
+                )
+            outputs['mysql_main'] = mysql_main_output
+
+        if 'postgres' in selected:
+            postgres_output = os.path.join(export_root, 'postgres_{}_{}.sql'.format(cfg.pg_database, today))
+            postgres_cmd = [
+                'pg_dump',
+                '--host', cfg.pg_host,
+                '--port', str(cfg.pg_port),
+                '--username', cfg.pg_user,
+                '--dbname', cfg.pg_database,
+                '--format', 'plain',
+                '--clean',
+                '--if-exists',
+            ]
+            postgres_env = os.environ.copy()
+            postgres_env['PGPASSWORD'] = cfg.pg_password
+            with open(postgres_output, 'w', encoding='utf-8') as handle:
+                subprocess.run(
+                    postgres_cmd,
+                    check=True,
+                    stdout=handle,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    env=postgres_env,
+                )
+            outputs['postgres'] = postgres_output
+
+        return {
+            'status': 'success',
+            'outputs': outputs,
+        }
+    except subprocess.CalledProcessError as exc:
+        logging.exception("Database export failed")
+        return {
+            'status': 'error',
+            'message': (exc.stderr or str(exc)).strip(),
+        }, 500
 
 @app.route('/gifgen/<string:archive>', methods=['GET'])
 def gifgen(archive):

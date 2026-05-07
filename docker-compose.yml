@@ -43,6 +43,7 @@ services:
       ARE_MYSQL_DB: "${ARE_MYSQL_DB:-nmdbDev}"
       ARE_MYSQL_REVIEW_DB: "${ARE_MYSQL_REVIEW_DB:-nmdbDev}"
       ARE_MYSQL_MAIN_DB: "${ARE_MYSQL_MAIN_DB:-NeuMO}"
+      ARE_EXPORT_ROOT: "${NMO_EXPORT_ROOT:-/home/kira/app/Ingestion/export}"
       ARE_DATA_ROOT: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}"
       ARE_REMOTEPATH: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}/NMOV8.0-ongoing/"
       ARE_READY_REMOTEPATH: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}"
@@ -56,6 +57,7 @@ services:
       - "${ARE_PORT:-5000}:5000"
     volumes:
       - "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}:${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}"
+      - "${NMO_EXPORT_ROOT:-/home/kira/app/Ingestion/export}:${NMO_EXPORT_ROOT:-/home/kira/app/Ingestion/export}"
     depends_on:
       redis:
         condition: service_healthy

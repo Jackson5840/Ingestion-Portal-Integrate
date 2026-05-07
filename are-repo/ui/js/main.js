@@ -100,6 +100,79 @@ function readarchives() {
     });
 }
 
+function exportdatabases() {
+    const progressWrapId = "export_db_progress_wrap";
+    const progressId = "export_db_progress";
+    const progressTextId = "export_db_progress_text";
+    const resultId = "export_db_result";
+    const selected = [];
+    if (document.getElementById("export_mysql_review").checked) selected.push('mysql_review');
+    if (document.getElementById("export_mysql_main").checked) selected.push('mysql_main');
+    if (document.getElementById("export_postgres").checked) selected.push('postgres');
+
+    if (selected.length === 0) {
+        document.getElementById(progressTextId).textContent = "Select at least one database to export.";
+        document.getElementById(progressId).className = "progress-bar bg-warning";
+        document.getElementById(progressId).style.width = "100%";
+        document.getElementById(progressId).textContent = "0%";
+        return;
+    }
+
+    const exportButton = document.getElementById("export_db_button");
+    const progressBar = document.getElementById(progressId);
+    const progressText = document.getElementById(progressTextId);
+    const resultBox = document.getElementById(resultId);
+    document.getElementById(progressWrapId).style.display = "block";
+    progressBar.className = "progress-bar progress-bar-striped progress-bar-animated bg-info";
+    progressBar.style.width = "15%";
+    progressBar.textContent = "15%";
+    progressText.textContent = "Starting database export...";
+    resultBox.innerHTML = "";
+    exportButton.classList.add('disabled');
+    exportButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Exporting DBs...';
+
+    $.ajax({
+        url: serverbase + 'exportdb/?' + selected.map(db => 'db=' + encodeURIComponent(db)).join('&'),
+        type: 'GET',
+        beforeSend: function () {
+            progressBar.style.width = "45%";
+            progressBar.textContent = "45%";
+            progressText.textContent = "Exporting selected databases...";
+        },
+        error: function (xhr) {
+            const message = xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : 'Unknown export error.';
+            progressBar.className = "progress-bar bg-danger";
+            progressBar.style.width = "100%";
+            progressBar.textContent = "Failed";
+            progressText.textContent = "Database export failed.";
+            resultBox.innerHTML = `<div class="small text-danger mt-2">${message}</div>`;
+            exportButton.classList.remove('disabled');
+            exportButton.innerHTML = 'Run export';
+        },
+        success: function (result) {
+            if (result.status === 'error') {
+                progressBar.className = "progress-bar bg-danger";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "Failed";
+                progressText.textContent = "Database export failed.";
+                resultBox.innerHTML = `<div class="small text-danger mt-2">${result.message}</div>`;
+            } else {
+                progressBar.className = "progress-bar bg-success";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "100%";
+                progressText.textContent = "Database export complete.";
+                const lines = [];
+                Object.keys(result.outputs || {}).forEach(key => {
+                    lines.push(`<div class="small text-success mt-1"><strong>${key}</strong>: ${result.outputs[key]}</div>`);
+                });
+                resultBox.innerHTML = lines.join("");
+            }
+            exportButton.classList.remove('disabled');
+            exportButton.innerHTML = 'Run export';
+        }
+    });
+}
+
 
 function readarchive(archive_name) {
     /* read one archive - transform archive to button of reading.
@@ -255,7 +328,32 @@ function createArchivePanel(archives) {
     pcontent += `</div>
 
        <p class="card-text"></p>
-       <a id="read_button" href="#" class="btn btn-primary" onclick="readarchives()">Read all archives</a>
+       <a id="read_button" href="#" class="btn btn-primary mr-2" onclick="readarchives()">Read all archives</a>
+       <div class="btn-group">
+         <button type="button" class="btn btn-secondary dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+           Export full DB
+         </button>
+         <div class="dropdown-menu p-3" style="min-width: 260px;">
+           <div class="form-check">
+             <input class="form-check-input" type="checkbox" id="export_mysql_review" checked>
+             <label class="form-check-label" for="export_mysql_review">MySQL review (nmdbDev)</label>
+           </div>
+           <div class="form-check">
+             <input class="form-check-input" type="checkbox" id="export_mysql_main" checked>
+             <label class="form-check-label" for="export_mysql_main">MySQL main (NeuMO)</label>
+           </div>
+           <div class="form-check mb-3">
+             <input class="form-check-input" type="checkbox" id="export_postgres" checked>
+             <label class="form-check-label" for="export_postgres">Postgres (nmo)</label>
+           </div>
+           <button id="export_db_button" type="button" class="btn btn-secondary btn-sm btn-block" onclick="exportdatabases()">Run export</button>
+           <div id="export_db_progress_wrap" class="progress mt-3" style="height: 18px; display: none;">
+             <div id="export_db_progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+           </div>
+           <div id="export_db_progress_text" class="small text-muted mt-2"></div>
+           <div id="export_db_result" class="mt-1"></div>
+         </div>
+       </div>
     </div> <div class="progress">
     <div id='archivebar' class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width: 0%"></div>
   <br/>
@@ -914,7 +1012,3 @@ $('#start_button').on('click', function () {
     })();
 
 });
-
-
-
-

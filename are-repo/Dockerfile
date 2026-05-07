@@ -1,21 +1,13 @@
-# our base image
-FROM ubuntu:18.04
+FROM ubuntu:22.04
 
-# Add the PostgreSQL PGP key to verify their Debian packages.
-# It should be the same key as https://www.postgresql.org/media/keys/ACCC4CF8.asc
+LABEL maintainer="bljungqu@gmu.edu"
 
-RUN apt-get update -y && \
-    apt-get install -y python3-pip python3-dev zlib1g-dev libjpeg-dev
-
-
-# Install python and pip
-MAINTAINER Bengt Ljungquist "bljungqu@gmu.edu"
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip python3-dev libopenblas-base libomp-dev zlib1g-dev libjpeg-dev
+    apt-get install -y python3-pip python3-dev libopenblas-base libomp-dev zlib1g-dev libjpeg-dev mysql-client postgresql-client curl && \
+    rm -rf /var/lib/apt/lists/*
 
-
-# install Python modules needed by the Python app
 COPY requirements.txt /app/
 
 WORKDIR /app
