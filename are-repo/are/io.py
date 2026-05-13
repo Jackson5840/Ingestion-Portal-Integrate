@@ -902,7 +902,10 @@ def revertarchive(foldername):
         archive = namefromfolder(foldername)
         (neuronarr,neuronids) = com.getarchiveneurons(archive)
         measids = com.getarchivemeasurements(archive)
+        if neuronarr:
+            com.cleanupmyarchiveextras(neuronarr)
         com.deleteingestedneurons(neuronarr)
+        com.deletemyarchive(archive)
         com.deletearchive(foldername,neuronarr)
         com.deletemeasurements(measids)
         
@@ -922,7 +925,10 @@ def deingestarchive(foldername):
         archive = namefromfolder(foldername)
         (neuronarr,neuronids) = com.getarchiveneurons(archive)
         measids = com.getarchivemeasurements(archive)
+        if neuronarr:
+            com.cleanupmyarchiveextras(neuronarr)
         com.deleteingestedneurons(neuronarr)
+        com.deletemyarchive(archive)
         com.deletearchiveingestion(foldername)
         com.deletemeasurements(measids)
         
@@ -931,6 +937,64 @@ def deingestarchive(foldername):
         result = {'message': 'Error: {}'.format(str(e)), "status": "error"}
         logging.exception("Error during revert archive: {}".format(foldername))
     return result
+
+
+def revertfrommain(foldername):
+    old_dbsel = cfg.dbsel
+    old_sshdir = cfg.sshdir
+    try:
+        archive = namefromfolder(foldername)
+        neuronarr, neuronids = com.getarchiveneurons(archive)
+        version_refs = com.getarchiveversionrefs(foldername)
+
+        for table_name, ref_key in (('version', 'version_id'), ('pubversion', 'pubversion_id')):
+            rollback = com.rollbackversiontable(table_name, version_refs.get(ref_key))
+            if rollback['status'] == 'error':
+                return {'message': rollback['message'], 'status': 'error'}
+
+        cfg.dbsel = cfg.dbselmain
+        cfg.sshdir = cfg.sshmaindir
+
+        if neuronarr:
+            com.cleanupmyarchiveextras(neuronarr)
+        if neuronarr:
+            com.deleteingestedneurons(neuronarr)
+        com.deletemyarchive(archive)
+
+        main_data_dir = os.path.join(cfg.sshmaindir, 'dableFiles', archive.lower())
+        main_image_dir = os.path.join(cfg.sshmaindir, 'images', 'imageFiles', archive)
+        if os.path.exists(main_data_dir):
+            deleteallfiles(main_data_dir)
+        if os.path.exists(main_image_dir):
+            deleteallfiles(main_image_dir)
+
+        main_gif_dir = os.path.join(cfg.sshmaindir, 'rotatingImages')
+        for neuron_name in neuronarr:
+            gif_path = os.path.join(main_gif_dir, neuron_name + '.CNG.gif')
+            if os.path.exists(gif_path):
+                os.remove(gif_path)
+
+        remove_archive_from_win(archive)
+        remove_archive_from_xml(os.path.join(cfg.sshmaindir, 'xml', 'archive_swc.xml'), archive)
+        remove_archive_from_xml(os.path.join(cfg.sshmaindir, 'xml', 'archive_all.xml'), archive)
+
+        version = com.getcurrentversion('pubversion')
+        dt_string = datetime.now().strftime("%Y-%m-%d")
+        updateinfo(foldername, version, dt_string)
+        updatetickertape()
+
+        cfg.dbsel = old_dbsel
+        cfg.sshdir = old_sshdir
+        revert_result = revertarchive(foldername)
+        if revert_result.get('status') == 'error':
+            return revert_result
+        return {'message': 'Archive reverted from main', "status": "success"}
+    except Exception as e:
+        logging.exception("Error during revert from main: {}".format(foldername))
+        return {'message': 'Error: {}'.format(str(e)), "status": "error"}
+    finally:
+        cfg.dbsel = old_dbsel
+        cfg.sshdir = old_sshdir
 
 def deleteneuron(neuronname):
     try:
@@ -1328,7 +1392,63 @@ def writeendings(foldername):
     if len(otherdict) > 0:
         xmlpath = cfg.sshdir + 'xml/archive_all.xml'
         writeswcfile(xmlpath,otherdict)
-      
+
+
+def remove_archive_from_win(archive):
+    winpath = cfg.sshmaindir + 'WIN.jsp'
+    if not os.path.exists(winpath):
+        return
+    with open(winpath, 'r', encoding='utf-8', errors='replace') as handle:
+        lines = handle.readlines()
+    filtered = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if 'ARCHIVE={}'.format(archive) in line or '{} archive'.format(archive) in line:
+            start = i
+            while start > 0 and lines[start].strip() != '<ul>':
+                start -= 1
+            if start > 0 and "What's new in version" in lines[start - 1]:
+                start -= 1
+                while start > 0 and lines[start - 1].strip() == '':
+                    start -= 1
+
+            end = i
+            while end < len(lines) and '</ul>' not in lines[end]:
+                end += 1
+            if end < len(lines):
+                end += 1
+
+            i = end
+            while i < len(lines) and lines[i].strip() == '':
+                i += 1
+            continue
+
+        filtered.append(line)
+        i += 1
+    with open(winpath, 'w', encoding='utf-8') as handle:
+        handle.writelines(filtered)
+
+
+def remove_archive_from_xml(xmlpath, archive):
+    if not os.path.exists(xmlpath):
+        return
+    with open(xmlpath, 'r', encoding='utf-8', errors='replace') as handle:
+        lines = handle.readlines()
+    filtered = []
+    skip = False
+    start_token = '<archive name="{}">'.format(archive)
+    for line in lines:
+        if start_token in line:
+            skip = True
+            continue
+        if skip and '</archive>' in line:
+            skip = False
+            continue
+        if not skip:
+            filtered.append(line)
+    with open(xmlpath, 'w', encoding='utf-8') as handle:
+        handle.writelines(filtered)
 
 
 class DuplicateException(Exception):
@@ -1794,6 +1914,7 @@ def transfergif(neuron_name):
         # copy gif file using shutil
         lgifdir = cfg.datapath + foldername + '/rotatingImages/'
         gifdir = cfg.sshdir + 'rotatingImages/'
+        os.makedirs(gifdir, exist_ok=True)
         # check if the file exists
         giffile = gifdir + neuron_name + '.CNG.gif'
         if not os.path.exists(giffile):
@@ -2018,7 +2139,19 @@ def mainrelease(foldername,dt_string):
         if not islocal:
             stdin, stdout, stderr = sshc.exec_command('/bin/rsync -rup {} {}'.format(src,dest))
         else:
-            subprocess.run(['/bin/rsync', '-rup', src, dest])
+            src = os.path.abspath(src)
+            dest = os.path.abspath(dest)
+            for root, dirs, files in os.walk(src):
+                rel_root = os.path.relpath(root, src)
+                target_root = dest if rel_root == '.' else os.path.join(dest, rel_root)
+                os.makedirs(target_root, exist_ok=True)
+                for dirname in dirs:
+                    os.makedirs(os.path.join(target_root, dirname), exist_ok=True)
+                for filename in files:
+                    srcfile = os.path.join(root, filename)
+                    destfile = os.path.join(target_root, filename)
+                    if not os.path.exists(destfile) or os.path.getmtime(srcfile) > os.path.getmtime(destfile):
+                        shutil.copy2(srcfile, destfile)
 
     archive = namefromfolder(foldername)
     print("Dt string in main release".format(dt_string))
@@ -2048,8 +2181,9 @@ def mainrelease(foldername,dt_string):
     neuron_names = exporttomain(foldername)
     archivestatus = com.getarchiveingestionstatus(foldername)
     com.updateuploaddate(neuron_names,dt_string,archivestatus["date"])
-    utils.writeimages()
-    transferimages()
+    # Temporarily disable scrolling text image regeneration and sync.
+    # utils.writeimages()
+    # transferimages()
     
     #stdin, stdout, stderr = sshc.exec_command('curl "http://localhost:8983/solr/search-Main/dataimport?command=full-import')
     #stdin, stdout, stderr = sshc.exec_command('curl "http://localhost:8983/solr/search-Review/dataimport?command=full-import')
@@ -2453,6 +2587,3 @@ def transfertocng(neuronfolder):
                 ssh.close()
             except Exception:
                 pass
-
-
-

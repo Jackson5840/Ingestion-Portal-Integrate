@@ -9,6 +9,8 @@ import redis
 import time
 import logging
 import subprocess
+import tempfile
+import shutil
 from are import cfg,io,com,utils,ingest,ingestdiameter
 #from IngestApp import Ingestion
 
@@ -85,6 +87,29 @@ def getarchives():
     return result
 
 
+@app.route('/logs/are', methods=['GET'])
+def get_are_logs():
+    lines = int(request.args.get('lines', '200'))
+    lines = max(10, min(lines, 1000))
+    logfile = os.path.join(app.root_path, 'app.log')
+    if not os.path.exists(logfile):
+        return {'status': 'success', 'content': '', 'lines': 0}
+
+    with open(logfile, 'r', encoding='utf-8', errors='replace') as handle:
+        content_lines = handle.readlines()
+
+    filtered_lines = [
+        line for line in content_lines
+        if 'GET /logs/are?lines=' not in line
+    ]
+    tail = filtered_lines[-lines:]
+    return {
+        'status': 'success',
+        'content': ''.join(tail),
+        'lines': len(tail),
+    }
+
+
 @app.route('/exportdb/', methods=['GET'])
 def exportdb():
     export_root = os.getenv('ARE_EXPORT_ROOT', '/home/kira/app/Ingestion/export')
@@ -105,7 +130,6 @@ def exportdb():
                 'mysqldump',
                 '--host', cfg.dbhost,
                 '--user', mysql_dump_user,
-                '--databases', cfg.dbselrev,
                 '--single-transaction',
                 '--column-statistics=0',
                 '--no-tablespaces',
@@ -113,6 +137,7 @@ def exportdb():
                 '--events',
                 '--triggers',
                 '--set-gtid-purged=OFF',
+                cfg.dbselrev,
             ]
             mysql_env = os.environ.copy()
             mysql_env['MYSQL_PWD'] = mysql_dump_password
@@ -133,7 +158,6 @@ def exportdb():
                 'mysqldump',
                 '--host', cfg.dbhost,
                 '--user', mysql_dump_user,
-                '--databases', cfg.dbselmain,
                 '--single-transaction',
                 '--column-statistics=0',
                 '--no-tablespaces',
@@ -141,6 +165,7 @@ def exportdb():
                 '--events',
                 '--triggers',
                 '--set-gtid-purged=OFF',
+                cfg.dbselmain,
             ]
             mysql_env = os.environ.copy()
             mysql_env['MYSQL_PWD'] = mysql_dump_password
@@ -189,6 +214,197 @@ def exportdb():
         return {
             'status': 'error',
             'message': (exc.stderr or str(exc)).strip(),
+        }, 500
+
+
+@app.route('/importdb/', methods=['POST'])
+def importdb():
+    db_target = request.form.get('db_target', '').strip()
+    dump_file = request.files.get('dump_file')
+    export_root = os.getenv('ARE_EXPORT_ROOT', '/home/kira/app/Ingestion/export')
+    os.makedirs(export_root, exist_ok=True)
+
+    if db_target not in {'mysql_review', 'mysql_main', 'postgres'}:
+        return {'status': 'error', 'message': 'Invalid database target.'}, 400
+    if dump_file is None or not dump_file.filename:
+        return {'status': 'error', 'message': 'No dump file uploaded.'}, 400
+
+    temp_path = None
+    try:
+        suffix = os.path.splitext(dump_file.filename)[1] or '.sql'
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, dir=export_root) as tmp:
+            dump_file.save(tmp)
+            temp_path = tmp.name
+
+        if db_target == 'mysql_review':
+            mysql_import_user = os.getenv('ARE_MYSQL_DUMP_USER', 'root')
+            mysql_import_password = os.getenv('ARE_MYSQL_ROOT_PASSWORD', os.getenv('ARE_MYSQL_PASSWORD', ''))
+            mysql_cmd = [
+                'mysql',
+                '--host', cfg.dbhost,
+                '--user', mysql_import_user,
+                cfg.dbselrev,
+            ]
+            mysql_env = os.environ.copy()
+            mysql_env['MYSQL_PWD'] = mysql_import_password
+            with open(temp_path, 'r', encoding='utf-8', errors='replace') as handle:
+                subprocess.run(
+                    mysql_cmd,
+                    check=True,
+                    stdin=handle,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    env=mysql_env,
+                )
+            imported_db = cfg.dbselrev
+        elif db_target == 'mysql_main':
+            mysql_import_user = os.getenv('ARE_MYSQL_DUMP_USER', 'root')
+            mysql_import_password = os.getenv('ARE_MYSQL_ROOT_PASSWORD', os.getenv('ARE_MYSQL_PASSWORD', ''))
+            mysql_cmd = [
+                'mysql',
+                '--host', cfg.dbhost,
+                '--user', mysql_import_user,
+                cfg.dbselmain,
+            ]
+            mysql_env = os.environ.copy()
+            mysql_env['MYSQL_PWD'] = mysql_import_password
+            with open(temp_path, 'r', encoding='utf-8', errors='replace') as handle:
+                subprocess.run(
+                    mysql_cmd,
+                    check=True,
+                    stdin=handle,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    universal_newlines=True,
+                    env=mysql_env,
+                )
+            imported_db = cfg.dbselmain
+        else:
+            postgres_cmd = [
+                'psql',
+                '--host', cfg.pg_host,
+                '--port', str(cfg.pg_port),
+                '--username', cfg.pg_user,
+                '--dbname', cfg.pg_database,
+                '--file', temp_path,
+            ]
+            postgres_env = os.environ.copy()
+            postgres_env['PGPASSWORD'] = cfg.pg_password
+            subprocess.run(
+                postgres_cmd,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                universal_newlines=True,
+                env=postgres_env,
+            )
+            imported_db = cfg.pg_database
+
+        return {
+            'status': 'success',
+            'database': imported_db,
+            'filename': dump_file.filename,
+        }
+    except subprocess.CalledProcessError as exc:
+        logging.exception("Database import failed")
+        return {
+            'status': 'error',
+            'message': (exc.stderr or exc.stdout or str(exc)).strip(),
+        }, 500
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.route('/exportarchivedata/<string:archive>', methods=['GET'])
+def exportarchivedata(archive):
+    archive_export_root = os.getenv('ARE_ARCHIVE_EXPORT_ROOT', '/home/kira/app/Ingestion/dataexport')
+    bundle_root = os.path.join(archive_export_root, archive)
+    files_root = os.path.join(bundle_root, 'files')
+    jsp_root = os.path.join(bundle_root, 'jsp')
+    xml_root = os.path.join(bundle_root, 'xml')
+
+    def ensure_parent(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+
+    def copy_file(src, dest):
+        ensure_parent(dest)
+        shutil.copy2(src, dest)
+
+    def copy_tree(src, dest):
+        if os.path.exists(dest):
+            shutil.rmtree(dest)
+        shutil.copytree(src, dest)
+
+    try:
+        archive_status = io.getarchivecsv()
+        matching = [item for item in archive_status.get('data', []) if item.get('name') == archive]
+        if not matching:
+            return {'status': 'error', 'message': 'Archive not found.'}, 404
+        if matching[0].get('status') not in ('public', 'published'):
+            return {'status': 'error', 'message': 'Archive has not completed Export to main.'}, 400
+
+        if os.path.exists(bundle_root):
+            shutil.rmtree(bundle_root)
+        os.makedirs(files_root, exist_ok=True)
+        os.makedirs(jsp_root, exist_ok=True)
+        os.makedirs(xml_root, exist_ok=True)
+
+        archive_lower = archive.lower()
+        main_root = cfg.sshmaindir
+
+        data_dirs = [
+            (
+                os.path.join(main_root, 'dableFiles', archive_lower),
+                os.path.join(files_root, 'dableFiles', archive_lower),
+            ),
+            (
+                os.path.join(main_root, 'images', 'imageFiles', archive),
+                os.path.join(files_root, 'images', 'imageFiles', archive),
+            ),
+        ]
+
+        for src, dest in data_dirs:
+            if os.path.exists(src):
+                copy_tree(src, dest)
+
+        neuron_names, _ = com.getarchiveneurons(archive)
+        rotating_src = os.path.join(main_root, 'rotatingImages')
+        rotating_dest = os.path.join(files_root, 'rotatingImages')
+        os.makedirs(rotating_dest, exist_ok=True)
+        for neuron_name in neuron_names:
+            gif_name = neuron_name + '.CNG.gif'
+            gif_src = os.path.join(rotating_src, gif_name)
+            if os.path.exists(gif_src):
+                copy_file(gif_src, os.path.join(rotating_dest, gif_name))
+
+        scrolling_src = os.path.join(main_root, 'images', 'scrollingText')
+        scrolling_dest = os.path.join(files_root, 'images', 'scrollingText')
+        if os.path.exists(scrolling_src):
+            copy_tree(scrolling_src, scrolling_dest)
+
+        jsp_files = ['WIN.jsp', 'Header.jsp', 'index.jsp']
+        for filename in jsp_files:
+            src = os.path.join(main_root, filename)
+            if os.path.exists(src):
+                copy_file(src, os.path.join(jsp_root, filename))
+
+        xml_files = ['archive_swc.xml', 'archive_all.xml']
+        for filename in xml_files:
+            src = os.path.join(main_root, 'xml', filename)
+            if os.path.exists(src):
+                copy_file(src, os.path.join(xml_root, filename))
+
+        return {
+            'status': 'success',
+            'bundle_root': bundle_root,
+        }
+    except Exception as exc:
+        logging.exception("Archive data export failed")
+        return {
+            'status': 'error',
+            'message': str(exc),
         }, 500
 
 @app.route('/gifgen/<string:archive>', methods=['GET'])
@@ -250,6 +466,12 @@ def archiveneurons():
 @app.route('/deingestarchive/<string:archive>', methods=['GET'])
 def deingestarchive(archive):
     result = io.deingestarchive(archive)
+    return result
+
+
+@app.route('/revertfrommain/<string:archive>', methods=['GET'])
+def revertfrommain(archive):
+    result = io.revertfrommain(archive)
     return result
 
 @app.route('/genwinjsp/<string:archive>', methods=['GET'])
@@ -355,7 +577,8 @@ def exporttomain(archive):
         (version,nneurons) = io.genwinjsp(archive, dt_string)
         io.writeendings(archive)
         io.updateinfo(archive,version,dt_string)
-        io.mainworkflow()
+        # Temporarily disable the main publish workflow trigger.
+        # io.mainworkflow()
         io.updatetickertape()
         results = {
             "data" : "Archive {} exported".format(archive),

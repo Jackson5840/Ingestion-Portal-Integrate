@@ -260,6 +260,59 @@ def getarchiveingestionstatus(conn,foldername):
         result = {}
     return result
 
+
+@pgconnect
+def getarchiveversionrefs(conn, foldername):
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    stmt = """
+    SELECT id, name, foldername, date, version_id, pubversion_id
+    FROM ingested_archives
+    WHERE foldername = '{}'
+    ORDER BY date DESC, id DESC
+    LIMIT 1
+    """.format(foldername)
+    cur.execute(stmt)
+    res = cur.fetchone()
+    return dict(res) if res else {}
+
+
+@pgconnect
+def rollbackversiontable(conn, table, previous_id):
+    if previous_id is None:
+        return {"status": "skipped", "message": "{} reference missing".format(table)}
+
+    cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cur.execute("SELECT id, major, minor, patch, active FROM {} WHERE id = {}".format(table, previous_id))
+    previous = cur.fetchone()
+    if previous is None:
+        return {"status": "error", "message": "{} previous version {} not found".format(table, previous_id)}
+
+    cur.execute("SELECT id, major, minor, patch, active FROM {} WHERE active = true ORDER BY id DESC LIMIT 1".format(table))
+    current = cur.fetchone()
+    if current is None:
+        return {"status": "error", "message": "{} current active version not found".format(table)}
+
+    previous = dict(previous)
+    current = dict(current)
+
+    if current["id"] == previous["id"]:
+        return {"status": "skipped", "message": "{} already active at {}".format(table, previous["id"])}
+
+    same_series = current["major"] == previous["major"] and current["minor"] == previous["minor"]
+    next_patch = current["patch"] == previous["patch"] + 1
+    if not (same_series and next_patch and current["id"] > previous["id"]):
+        return {
+            "status": "error",
+            "message": "{} active version {} does not look like the next version after {}".format(table, current["id"], previous["id"]),
+        }
+
+    cur = conn.cursor()
+    cur.execute("UPDATE {} SET active = false WHERE id = {}".format(table, current["id"]))
+    cur.execute("UPDATE {} SET active = true WHERE id = {}".format(table, previous["id"]))
+    cur.execute("DELETE FROM {} WHERE id = {}".format(table, current["id"]))
+
+    return {"status": "success", "message": "{} rolled back from {} to {}".format(table, current["id"], previous["id"])}
+
 @pgconnect
 def getpvec(conn,neuron_id):
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -1068,6 +1121,52 @@ def deletemyneuron(conn,neuronname):
     cur = conn.cursor()
     stmt = "delete from neuron where neuron_name='{}'".format(neuronname)
     cur.execute(stmt)
+
+
+@myconnect
+def deletemyarchive(conn,archive_name):
+    """
+    Delete archive from release DB after its neurons are removed.
+    """
+    cur = conn.cursor()
+    stmt = "delete from archive where archive_name='{}'".format(archive_name)
+    cur.execute(stmt)
+
+
+@myconnect
+def cleanupmyarchiveextras(conn, neuronarr):
+    if not neuronarr:
+        return
+
+    quoted_names = "','".join(neuronarr)
+
+    cur = conn.cursor()
+    stmt = "SELECT neuron_id FROM deposition WHERE neuron_name IN ('{}')".format(quoted_names)
+    cur.execute(stmt)
+    neuron_ids = [str(item[0]) for item in cur.fetchall()]
+
+    if neuron_ids:
+        id_list = ",".join(neuron_ids)
+        cur.execute("DELETE FROM persistance_vector WHERE neuron_id IN ({})".format(id_list))
+        cur.execute("DELETE FROM Tissue_shrinkage WHERE neuron_id IN ({})".format(id_list))
+
+    cur.execute("SELECT DISTINCT article_id, PMID FROM neuron_article WHERE neuron_id IN ({})".format(",".join(neuron_ids) if neuron_ids else "0"))
+    article_rows = cur.fetchall()
+    article_ids = [str(item[0]) for item in article_rows if item[0] is not None]
+    pmids = [str(item[1]) for item in article_rows if item[1] is not None]
+
+    if article_ids:
+        cur.execute(
+            "DELETE FROM reference_article WHERE article_id IN ({}) AND article_id NOT IN (SELECT article_id FROM neuron_article)".format(
+                ",".join(article_ids)
+            )
+        )
+    if pmids:
+        cur.execute(
+            "DELETE FROM AllPublications WHERE PMID IN ({}) AND PMID NOT IN (SELECT PMID FROM neuron_article WHERE PMID IS NOT NULL)".format(
+                ",".join(pmids)
+            )
+        )
 
 
 @pgconnect

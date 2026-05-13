@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+        <title>ARE Log</title>
+        <link href="css/styles.css" rel="stylesheet" />
+    </head>
+    <body class="bg-light">
+        <div class="container-fluid py-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h5 class="mb-0">ARE Log</h5>
+                <button type="button" class="btn btn-sm btn-outline-primary" onclick="refreshAreLog()">Refresh</button>
+            </div>
+            <div id="logViewerStatus" class="small text-muted mb-2">Loading log...</div>
+            <pre id="logViewerContent" style="background:#0f172a;color:#e2e8f0;min-height:520px;max-height:80vh;overflow:auto;padding:12px;border-radius:4px;white-space:pre-wrap;"></pre>
+        </div>
+
+        <script src="https://code.jquery.com/jquery-3.4.1.min.js" crossorigin="anonymous"></script>
+        <script>
+            let logViewerTimer = null;
+            let logRefreshPaused = false;
+
+            function refreshAreLog() {
+                if (logRefreshPaused) {
+                    $('#logViewerStatus').text('Auto-refresh paused while text is selected.');
+                    return;
+                }
+                $.ajax({
+                    url: '../logs/are?lines=200',
+                    type: 'GET',
+                    success: function(result) {
+                        const logElem = document.getElementById('logViewerContent');
+                        const previousScrollTop = logElem.scrollTop;
+                        $('#logViewerStatus').text('Showing last ' + (result.lines || 0) + ' lines. Auto-refresh every 2s.');
+                        $('#logViewerContent').text(result.content || '');
+                        logElem.scrollTop = previousScrollTop;
+                    },
+                    error: function(xhr) {
+                        const message = xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : 'Failed to load log.';
+                        $('#logViewerStatus').text(message);
+                    }
+                });
+            }
+
+            $(document).ready(function() {
+                document.addEventListener('selectionchange', function() {
+                    const selection = window.getSelection();
+                    logRefreshPaused = !!selection && selection.toString().length > 0;
+                    if (!logRefreshPaused) {
+                        $('#logViewerStatus').text('Showing last lines. Auto-refresh every 2s.');
+                    }
+                });
+                refreshAreLog();
+                logViewerTimer = setInterval(refreshAreLog, 2000);
+            });
+
+            window.addEventListener('beforeunload', function() {
+                if (logViewerTimer) {
+                    clearInterval(logViewerTimer);
+                    logViewerTimer = null;
+                }
+            });
+        </script>
+    </body>
+</html>

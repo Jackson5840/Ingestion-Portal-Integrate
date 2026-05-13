@@ -12,9 +12,20 @@ $(document).ready(function() {
         window.alert("Archive csv file mismatch!!!!");
         return;
     }
+    $(document).on('click', '.dropdown-menu.keep-open', function(e) {
+        e.stopPropagation();
+    });
     createArchivePanel(activearchives.data);
     createDataPanel(activearchives.data)
 });
+
+function openAreLogWindow() {
+    window.open(
+        serverbase + 'ui/log.html',
+        'areLogWindow',
+        'width=900,height=650,resizable=yes,scrollbars=yes'
+    );
+}
 
 function getarchives() {
     //get archives available - called on load
@@ -173,6 +184,199 @@ function exportdatabases() {
     });
 }
 
+function importdatabase() {
+    const target = document.getElementById("import_db_target").value;
+    const fileInput = document.getElementById("import_db_file");
+    const progressWrapId = "import_db_progress_wrap";
+    const progressId = "import_db_progress";
+    const progressTextId = "import_db_progress_text";
+    const resultId = "import_db_result";
+    const importButton = document.getElementById("import_db_button");
+    const progressBar = document.getElementById(progressId);
+    const progressText = document.getElementById(progressTextId);
+    const resultBox = document.getElementById(resultId);
+
+    if (!target) {
+        document.getElementById(progressWrapId).style.display = "block";
+        progressBar.className = "progress-bar bg-warning";
+        progressBar.style.width = "100%";
+        progressBar.textContent = "0%";
+        progressText.textContent = "Select a database target.";
+        resultBox.innerHTML = "";
+        return;
+    }
+
+    if (!fileInput.files || fileInput.files.length === 0) {
+        document.getElementById(progressWrapId).style.display = "block";
+        progressBar.className = "progress-bar bg-warning";
+        progressBar.style.width = "100%";
+        progressBar.textContent = "0%";
+        progressText.textContent = "Select a dump file to import.";
+        resultBox.innerHTML = "";
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append("db_target", target);
+    formData.append("dump_file", fileInput.files[0]);
+
+    document.getElementById(progressWrapId).style.display = "block";
+    progressBar.className = "progress-bar progress-bar-striped progress-bar-animated bg-info";
+    progressBar.style.width = "15%";
+    progressBar.textContent = "15%";
+    progressText.textContent = "Uploading dump file...";
+    resultBox.innerHTML = "";
+    importButton.classList.add("disabled");
+    importButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Importing...';
+
+    $.ajax({
+        url: serverbase + 'importdb/',
+        type: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        xhr: function () {
+            const xhr = new window.XMLHttpRequest();
+            xhr.upload.addEventListener('progress', function (event) {
+                if (event.lengthComputable) {
+                    const uploadProgress = Math.max(15, Math.min(85, Math.round((event.loaded / event.total) * 70 + 15)));
+                    progressBar.style.width = uploadProgress + "%";
+                    progressBar.textContent = uploadProgress + "%";
+                    progressText.textContent = "Uploading dump file...";
+                }
+            });
+            return xhr;
+        },
+        beforeSend: function () {
+            progressBar.style.width = "25%";
+            progressBar.textContent = "25%";
+            progressText.textContent = "Starting import...";
+        },
+        error: function (xhr) {
+            const message = xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : 'Unknown import error.';
+            progressBar.className = "progress-bar bg-danger";
+            progressBar.style.width = "100%";
+            progressBar.textContent = "Failed";
+            progressText.textContent = "Database import failed.";
+            resultBox.innerHTML = `<div class="small text-danger mt-2">${message}</div>`;
+            importButton.classList.remove("disabled");
+            importButton.innerHTML = "Run import";
+        },
+        success: function (result) {
+            if (result.status === 'error') {
+                progressBar.className = "progress-bar bg-danger";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "Failed";
+                progressText.textContent = "Database import failed.";
+                resultBox.innerHTML = `<div class="small text-danger mt-2">${result.message}</div>`;
+            } else {
+                progressBar.className = "progress-bar bg-success";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "100%";
+                progressText.textContent = "Database import complete.";
+                resultBox.innerHTML = `<div class="small text-success mt-2"><strong>${result.database}</strong> imported from ${result.filename}</div>`;
+            }
+            importButton.classList.remove("disabled");
+            importButton.innerHTML = "Run import";
+        }
+    });
+}
+
+function exportarchivedata() {
+    const archiveSelect = document.getElementById("export_archive_target");
+    const archiveName = archiveSelect.value;
+    const progressWrapId = "export_archive_progress_wrap";
+    const progressId = "export_archive_progress";
+    const progressTextId = "export_archive_progress_text";
+    const resultId = "export_archive_result";
+    const exportButton = document.getElementById("export_archive_button");
+    const progressBar = document.getElementById(progressId);
+    const progressText = document.getElementById(progressTextId);
+    const resultBox = document.getElementById(resultId);
+
+    if (!archiveName) {
+        document.getElementById(progressWrapId).style.display = "block";
+        progressBar.className = "progress-bar bg-warning";
+        progressBar.style.width = "100%";
+        progressBar.textContent = "0%";
+        progressText.textContent = "Select an exported archive.";
+        resultBox.innerHTML = "";
+        return;
+    }
+
+    document.getElementById(progressWrapId).style.display = "block";
+    progressBar.className = "progress-bar progress-bar-striped progress-bar-animated bg-info";
+    progressBar.style.width = "20%";
+    progressBar.textContent = "20%";
+    progressText.textContent = "Preparing archive export bundle...";
+    resultBox.innerHTML = "";
+    exportButton.classList.add("disabled");
+    exportButton.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Exporting...';
+
+    $.ajax({
+        url: serverbase + 'exportarchivedata/' + encodeURIComponent(archiveName),
+        type: 'GET',
+        beforeSend: function () {
+            progressBar.style.width = "45%";
+            progressBar.textContent = "45%";
+            progressText.textContent = "Collecting files and JSP/XML updates...";
+        },
+        error: function (xhr) {
+            const message = xhr.responseJSON && xhr.responseJSON.message ? xhr.responseJSON.message : 'Unknown archive export error.';
+            progressBar.className = "progress-bar bg-danger";
+            progressBar.style.width = "100%";
+            progressBar.textContent = "Failed";
+            progressText.textContent = "Archive data export failed.";
+            resultBox.innerHTML = `<div class="small text-danger mt-2">${message}</div>`;
+            exportButton.classList.remove("disabled");
+            exportButton.innerHTML = "Ready";
+        },
+        success: function (result) {
+            if (result.status === 'error') {
+                progressBar.className = "progress-bar bg-danger";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "Failed";
+                progressText.textContent = "Archive data export failed.";
+                resultBox.innerHTML = `<div class="small text-danger mt-2">${result.message}</div>`;
+            } else {
+                progressBar.className = "progress-bar bg-success";
+                progressBar.style.width = "100%";
+                progressBar.textContent = "100%";
+                progressText.textContent = "Archive data export complete.";
+                resultBox.innerHTML = `<div class="small text-success mt-2"><strong>${archiveName}</strong> bundle: ${result.bundle_root}</div>`;
+            }
+            exportButton.classList.remove("disabled");
+            exportButton.innerHTML = "Ready";
+        }
+    });
+}
+
+function revertfrommain(archive_name) {
+    const button = $('#' + archive_name + '_rfmbutton');
+    button.prop('disabled', true).html(
+        `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Reverting...`
+    );
+
+    $.ajax({
+        url: serverbase + 'revertfrommain/' + archive_name,
+        type: 'GET',
+        error: function () {
+            button.prop('disabled', false).html('Revert from main');
+        },
+        success: function (result) {
+            if (result.status === 'error') {
+                button.removeClass('btn-primary').addClass('btn-danger');
+            } else {
+                activearchives = JSON.parse(getarchives());
+                $(".archivecont").empty();
+                createArchivePanel(activearchives.data);
+                $(".container").empty();
+                createDataPanel(activearchives.data);
+            }
+        }
+    });
+}
+
 
 function readarchive(archive_name) {
     /* read one archive - transform archive to button of reading.
@@ -273,6 +477,7 @@ function readarchive(archive_name) {
 
 
 function createArchivePanel(archives) {
+    const exportableArchives = archives.filter(archive => ['public', 'published'].includes(archive.status));
     pcontent =
     `<div class="card" style ="overflow: visible !important;" >
         <div class="card-body" style ="overflow: visible !important;" >
@@ -333,7 +538,7 @@ function createArchivePanel(archives) {
          <button type="button" class="btn btn-secondary dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
            Export full DB
          </button>
-         <div class="dropdown-menu p-3" style="min-width: 260px;">
+         <div class="dropdown-menu keep-open p-3" style="min-width: 260px;">
            <div class="form-check">
              <input class="form-check-input" type="checkbox" id="export_mysql_review" checked>
              <label class="form-check-label" for="export_mysql_review">MySQL review (nmdbDev)</label>
@@ -354,6 +559,53 @@ function createArchivePanel(archives) {
            <div id="export_db_result" class="mt-1"></div>
          </div>
        </div>
+       <div class="btn-group ml-2">
+         <button type="button" class="btn btn-secondary dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+           Import full DB
+         </button>
+         <div class="dropdown-menu keep-open p-3" style="min-width: 320px;">
+           <div class="form-group mb-2">
+             <label class="small mb-1" for="import_db_target">Database</label>
+             <select id="import_db_target" class="form-control form-control-sm">
+               <option value="">Select target</option>
+               <option value="mysql_review">MySQL review (nmdbDev)</option>
+               <option value="mysql_main">MySQL main (NeuMO)</option>
+               <option value="postgres">Postgres (nmo)</option>
+             </select>
+           </div>
+           <div class="form-group mb-3">
+             <label class="small mb-1" for="import_db_file">Dump file</label>
+             <input id="import_db_file" type="file" class="form-control-file" accept=".sql">
+           </div>
+           <button id="import_db_button" type="button" class="btn btn-secondary btn-sm btn-block" onclick="importdatabase()">Run import</button>
+           <div id="import_db_progress_wrap" class="progress mt-3" style="height: 18px; display: none;">
+             <div id="import_db_progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+           </div>
+           <div id="import_db_progress_text" class="small text-muted mt-2"></div>
+           <div id="import_db_result" class="mt-1"></div>
+         </div>
+       </div>
+       <div class="btn-group ml-2">
+         <button type="button" class="btn btn-secondary dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
+           Export archive data
+         </button>
+         <div class="dropdown-menu keep-open p-3" style="min-width: 320px;">
+           <div class="form-group mb-3">
+             <label class="small mb-1" for="export_archive_target">Archive</label>
+             <select id="export_archive_target" class="form-control form-control-sm">
+               <option value="">Select exported archive</option>
+               ${exportableArchives.map(archive => `<option value="${archive.name}">${archive.name}</option>`).join("")}
+             </select>
+           </div>
+           <button id="export_archive_button" type="button" class="btn btn-secondary btn-sm btn-block" onclick="exportarchivedata()">Ready</button>
+           <div id="export_archive_progress_wrap" class="progress mt-3" style="height: 18px; display: none;">
+             <div id="export_archive_progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+           </div>
+           <div id="export_archive_progress_text" class="small text-muted mt-2"></div>
+           <div id="export_archive_result" class="mt-1"></div>
+         </div>
+       </div>
+       <button type="button" class="btn btn-outline-primary ml-2" id="logViewerOpenInline" onclick="openAreLogWindow()">Log</button>
     </div> <div class="progress">
     <div id='archivebar' class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" style="width: 0%"></div>
   <br/>
@@ -776,6 +1028,7 @@ function createDataPanel(archives){
         <td><button id="${archive.name}_mbutton" class="btn btn-primary btn-sm" type="button" style="float:right" onclick="exporttomain('${archive.name}')">Export to main</button></td>
         <td><button id="${archive.name}_rbutton" ${rdisabled}  class="btn btn-primary btn-sm" type="button" style="float:right" onclick="deleteneurons('${archive.name}',dm)">Revert Archive</button></td>
         <td><button id="${archive.name}_arbutton" ${rdisabled}  class="btn btn-primary btn-sm" type="button" style="float:right" onclick="archiveneurons('${archive.name}',dm)">Archive neurons</button></td>
+        <td><button id="${archive.name}_rfmbutton" ${archive.status === 'public' || archive.status === 'published' ? '' : 'disabled="true"'} class="btn btn-warning btn-sm" type="button" style="float:right" onclick="revertfrommain('${archive.name}')">Revert from main</button></td>
         <!-- <td><button id="${archive.name}_dbutton" ${rdisabled}  class="btn btn-primary btn-sm" type="button" style="float:right" onclick="archiveneurons('${archive.name}',dm)">Diameter Check</button></td> -->
         
         </tr>
