@@ -430,8 +430,11 @@ function readarchive(archive_name) {
     }, 1000);
 
 
+    const readSteps = getReadSteps(archive_name);
     $.ajax({
-    url: serverbase + 'readarchive/' + archive_name,
+    url: serverbase + 'readarchive_steps/' + archive_name,
+    contentType: 'application/json',
+    data: JSON.stringify({ steps: readSteps }),
     error: function () {
         console.log("Error!!!");
         alert("Read error: UNKNOW ERROR.");
@@ -466,8 +469,37 @@ function readarchive(archive_name) {
         $(".archivecont").empty()
         createArchivePanel(activearchives.data)		
     },
-    type: 'GET'
+    type: 'POST'
     }); 
+}
+
+function getReadSteps(archive_name) {
+    const stepNames = ['copy_files', 'source_files', 'precheck', 'pvec', 'duplicates', 'set_ready'];
+    const steps = {};
+    stepNames.forEach(function(stepName) {
+        const element = document.getElementById(`${archive_name}_step_${stepName}`);
+        steps[stepName] = !element || element.checked;
+    });
+    if (!steps.pvec) {
+        steps.duplicates = false;
+    }
+    return steps;
+}
+
+function toggleReadStep(event, archive_name, stepName) {
+    event.stopPropagation();
+    if (stepName === 'pvec') {
+        const duplicateElement = document.getElementById(`${archive_name}_step_duplicates`);
+        if (duplicateElement && !event.target.checked) {
+            duplicateElement.checked = false;
+        }
+    }
+    if (stepName === 'duplicates' && event.target.checked) {
+        const pvecElement = document.getElementById(`${archive_name}_step_pvec`);
+        if (pvecElement) {
+            pvecElement.checked = true;
+        }
+    }
 }
 
 
@@ -524,6 +556,15 @@ function createArchivePanel(archives) {
         <button id="${archive.name}_button" type="button" class="btn  ${btnclass} dropdown-toggle m-1" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false">${archive.name} <span class="badge badge-light">${archive.nneurons}</span></button>
         <div class="dropdown-menu">
         <a class="dropdown-item" href="#" onclick="readarchive('${archive.name}')">Read archive</a>
+        <div class="dropdown-divider"></div>
+        <h6 class="dropdown-header">Read steps</h6>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_copy_files" checked onchange="toggleReadStep(event, '${archive.name}', 'copy_files')"> Copy archive and metadata</label>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_source_files" checked onchange="toggleReadStep(event, '${archive.name}', 'source_files')"> Source files and std logs</label>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_precheck" checked onchange="toggleReadStep(event, '${archive.name}', 'precheck')"> Precheck files</label>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_pvec" checked onchange="toggleReadStep(event, '${archive.name}', 'pvec')"> PVec</label>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_duplicates" checked onchange="toggleReadStep(event, '${archive.name}', 'duplicates')"> Duplicate check</label>
+        <label class="dropdown-item mb-0" onclick="event.stopPropagation();"><input type="checkbox" id="${archive.name}_step_set_ready" checked onchange="toggleReadStep(event, '${archive.name}', 'set_ready')"> Set ready status</label>
+        <div class="dropdown-divider"></div>
         <a class="dropdown-item" style="word-wrap: break-word;  white-space: normal;" id="${archive.name}_message" href="#">Status:${archive.status}. Status message:${archive.message}</a>
         
         ${parsedjson}
@@ -570,6 +611,7 @@ function createArchivePanel(archives) {
                <option value="">Select target</option>
                <option value="mysql_review">MySQL review (nmdbDev)</option>
                <option value="mysql_main">MySQL main (NeuMO)</option>
+               <option value="logging_data">MySQL LoggingData</option>
                <option value="postgres">Postgres (nmo)</option>
              </select>
            </div>

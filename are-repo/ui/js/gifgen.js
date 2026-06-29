@@ -19,17 +19,17 @@ function gifgen(archive) {
     $.get(serverbase + "gifgen/" + archive, function(data, status){
         if (status == "success") {
             updateprogress(archive,100);
-            
+
 
         }
-        
-    });    
+
+    });
 }
 
 function checkstatus(archive) {
-    /* Checks status of ingestion for archive.   
+    /* Checks status of ingestion for archive.
     */
-    
+
     $.get(serverbase + "checkgif/" + archive, function(data, status){
         console.log(status)
         if (status == "success") {
@@ -46,14 +46,14 @@ function checkstatus(archive) {
                 }
             }
         }
-    });    
+    });
 }
 
 
 function updateprogress(archive,percent) {
     pbar = document.getElementById("pbar_" + archive);
     //thewidth = parseFloat(pbar.style.width.slice(0,-1)) + 10;
-    pbar.style.width = (percent).toString() + '%'; 
+    pbar.style.width = (percent).toString() + '%';
 }
 
 function genbuttonlist(data) {
@@ -70,5 +70,62 @@ function genbuttonlist(data) {
     });
     elem += "</table>";
     $(elem).appendTo(".test1");
-    
+
+}
+
+function gifgenFolder() {
+    var swcdir = document.getElementById('swcdir').value.trim();
+    var outputdir = document.getElementById('outputdir').value.trim();
+    var statusDiv = document.getElementById('gifgen_folder_status');
+    var progressWrap = document.getElementById('gifgen_folder_progress_wrap');
+    var pbar = document.getElementById('gifgen_folder_pbar');
+
+    if (!swcdir || !outputdir) {
+        statusDiv.innerHTML = '<span class="text-danger">Please fill in both folder paths.</span>';
+        return;
+    }
+
+    document.getElementById('gifgen_folder_btn').disabled = true;
+    statusDiv.innerHTML = '<span class="text-info">Starting GIF generation...</span>';
+    progressWrap.style.display = 'flex';
+    pbar.style.width = '0%';
+
+    $.ajax({
+        url: serverbase + 'gifgen_folder',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ swcdir: swcdir, outputdir: outputdir }),
+        success: function(data) {
+            if (data.status === 'error') {
+                statusDiv.innerHTML = '<span class="text-danger">Error: ' + data.message + '</span>';
+                document.getElementById('gifgen_folder_btn').disabled = false;
+                return;
+            }
+            statusDiv.innerHTML = '<span class="text-info">Running... (job: ' + data.job_id + ')</span>';
+            setTimeout(function() { checkFolderStatus(data.job_id); }, 3000);
+        },
+        error: function() {
+            statusDiv.innerHTML = '<span class="text-danger">Request failed.</span>';
+            document.getElementById('gifgen_folder_btn').disabled = false;
+        }
+    });
+}
+
+function checkFolderStatus(job_id) {
+    var statusDiv = document.getElementById('gifgen_folder_status');
+    var pbar = document.getElementById('gifgen_folder_pbar');
+
+    $.get(serverbase + 'checkgif/' + job_id, function(data) {
+        pbar.style.width = data.progress + '%';
+        if (data.status === 'error') {
+            statusDiv.innerHTML = '<span class="text-danger">Error generating GIFs.</span>';
+            document.getElementById('gifgen_folder_btn').disabled = false;
+        } else if (data.progress >= 100) {
+            statusDiv.innerHTML = '<span class="text-success">Done! GIFs saved to output folder.</span>';
+            pbar.classList.remove('progress-bar-animated', 'progress-bar-striped');
+            document.getElementById('gifgen_folder_btn').disabled = false;
+        } else {
+            setTimeout(function() { checkFolderStatus(job_id); }, 3000);
+        }
+    });
 }

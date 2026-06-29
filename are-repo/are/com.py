@@ -1132,6 +1132,83 @@ def deletemyarchive(conn,archive_name):
     stmt = "delete from archive where archive_name='{}'".format(archive_name)
     cur.execute(stmt)
 
+@myconnect
+def deletemyarchivecascade(conn, archive_name):
+    cur = conn.cursor()
+    cur.execute("SELECT archive_id FROM archive WHERE archive_name='{}'".format(archive_name))
+    archive_rows = cur.fetchall()
+    archive_ids = [str(item[0]) for item in archive_rows]
+    if not archive_ids:
+        return
+
+    cur.execute("SELECT neuron_id FROM neuron WHERE archive_id IN ({})".format(",".join(archive_ids)))
+    neuron_ids = [str(item[0]) for item in cur.fetchall()]
+
+    if neuron_ids:
+        id_list = ",".join(neuron_ids)
+        dependent_tables = [
+            'api_integrity',
+            'api_neuron',
+            'brainRegion_neuron',
+            'cellType_neuron',
+            'celltype_table',
+            'deposition',
+            'DOMAINTEMP',
+            'export_neuron',
+            'file',
+            'GenerateReport_Groups',
+            'measurements',
+            'measurementsAP',
+            'measurementsAPA',
+            'measurementsAPB',
+            'measurementsAX',
+            'measurementsBS',
+            'measurementsBSA',
+            'measurementsNEU',
+            'measurementsPR',
+            'neuron_article',
+            'neuron_auxdata',
+            'neuron_completeness',
+            'neuron_expercond',
+            'neuron_intermed',
+            'neuron_multiple',
+            'nif_neuron',
+            'persistance_vector',
+            'temp_export',
+            'Tissue_shrinkage',
+        ]
+
+        cur.execute(
+            """
+            SELECT TABLE_NAME
+            FROM information_schema.TABLES
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND TABLE_TYPE = 'BASE TABLE'
+            AND TABLE_NAME IN ({})
+            """.format(",".join(["'{}'".format(table) for table in dependent_tables]))
+        )
+        base_tables = set(item[0] for item in cur.fetchall())
+
+        cur.execute(
+            """
+            SELECT TABLE_NAME
+            FROM information_schema.COLUMNS
+            WHERE TABLE_SCHEMA = DATABASE()
+            AND COLUMN_NAME = 'neuron_id'
+            AND TABLE_NAME IN ({})
+            """.format(",".join(["'{}'".format(table) for table in dependent_tables]))
+        )
+        tables_with_neuron_id = set(item[0] for item in cur.fetchall())
+
+        for table in dependent_tables:
+            if table not in base_tables or table not in tables_with_neuron_id:
+                continue
+            cur.execute("DELETE FROM {} WHERE neuron_id IN ({})".format(table, id_list))
+
+        cur.execute("DELETE FROM neuron WHERE neuron_id IN ({})".format(id_list))
+
+    cur.execute("DELETE FROM archive WHERE archive_id IN ({})".format(",".join(archive_ids)))
+
 
 @myconnect
 def cleanupmyarchiveextras(conn, neuronarr):

@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+        <meta name="description" content="" />
+        <meta name="author" content="" />
+        <title>Major Release - NeuroMorpho Admin</title>
+        <link href="css/styles.css" rel="stylesheet" />
+        <style>
+            .downloads-report-table {
+                max-height: 420px;
+                overflow-y: auto;
+            }
+            .downloads-quarter-chart {
+                height: 420px;
+                min-height: 420px;
+            }
+        </style>
+        <link href="https://cdn.datatables.net/1.10.20/css/dataTables.bootstrap4.min.css" rel="stylesheet" crossorigin="anonymous" />
+        <link rel="icon" type="image/x-icon" href="assets/img/favicon.png" />
+        <script data-search-pseudo-elements defer src="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.11.2/js/all.min.js" crossorigin="anonymous"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/feather-icons/4.24.1/feather.min.js" crossorigin="anonymous"></script>
+    </head>
+    <body class="nav-fixed">
+        <nav class="topnav navbar navbar-expand shadow navbar-light bg-white" id="sidenavAccordion">
+            <a class="navbar-brand d-none d-sm-block" href="index.html">NeuroMorpho Admin</a><button class="btn btn-icon btn-transparent-dark order-1 order-lg-0 mr-lg-2" id="sidebarToggle" href="#"><i data-feather="menu"></i></button>
+            <form class="form-inline mr-auto d-none d-lg-block"><input class="form-control form-control-solid mr-sm-2" type="search" placeholder="Search" aria-label="Search" /></form>
+            <ul class="navbar-nav align-items-center ml-auto">
+                <li class="nav-item dropdown no-caret mr-3">
+                    <a class="nav-link dropdown-toggle" id="navbarDropdownDocs" href="javascript:void(0);" role="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"
+                        ><div class="d-inline d-md-none font-weight-500">Docs</div>
+                        <div class="d-none d-md-inline font-weight-500">Documentation</div>
+                        <i class="fas fa-chevron-right dropdown-arrow"></i
+                    ></a>
+                    <div class="dropdown-menu dropdown-menu-right py-0 o-hidden mr-n15 mr-lg-0 animated--fade-in-up" aria-labelledby="navbarDropdownDocs">
+                        <a class="dropdown-item py-3" href="https://docs.startbootstrap.com/sb-admin-pro" target="_blank"
+                            ><div class="icon-stack bg-primary-soft text-primary mr-4"><i data-feather="book"></i></div>
+                            <div>
+                                <div class="small text-gray-500">Documentation</div>
+                                Usage instructions and reference
+                            </div></a
+                        >
+                        <div class="dropdown-divider m-0"></div>
+                        <a class="dropdown-item py-3" href="https://docs.startbootstrap.com/sb-admin-pro/components" target="_blank"
+                            ><div class="icon-stack bg-primary-soft text-primary mr-4"><i data-feather="code"></i></div>
+                            <div>
+                                <div class="small text-gray-500">Components</div>
+                                Code snippets and reference
+                            </div></a
+                        >
+                        <div class="dropdown-divider m-0"></div>
+                        <a class="dropdown-item py-3" href="https://docs.startbootstrap.com/sb-admin-pro/changelog" target="_blank"
+                            ><div class="icon-stack bg-primary-soft text-primary mr-4"><i data-feather="file-text"></i></div>
+                            <div>
+                                <div class="small text-gray-500">Changelog</div>
+                                Updates and changes
+                            </div></a
+                        >
+                    </div>
+                </li>
+                <li class="nav-item dropdown no-caret mr-3 dropdown-notifications">
+                    <a class="btn btn-icon btn-transparent-dark dropdown-toggle" id="navbarDropdownAlerts" href="javascript:void(0);" role="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><i data-feather="bell"></i></a>
+                    <div class="dropdown-menu dropdown-menu-right border-0 shadow animated--fade-in-up" aria-labelledby="navbarDropdownAlerts">
+                        <h6 class="dropdown-header dropdown-notifications-header"><i class="mr-2" data-feather="bell"></i>Alerts Center</h6>
+                        <a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><div class="dropdown-notifications-item-icon bg-warning"><i data-feather="activity"></i></div>
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-details">December 29, 2019</div>
+                                <div class="dropdown-notifications-item-content-text">This is an alert message. It's nothing serious, but it requires your attention.</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><div class="dropdown-notifications-item-icon bg-info"><i data-feather="bar-chart"></i></div>
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-details">December 22, 2019</div>
+                                <div class="dropdown-notifications-item-content-text">A new monthly report is ready. Click here to view!</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><div class="dropdown-notifications-item-icon bg-danger"><i class="fas fa-exclamation-triangle"></i></div>
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-details">December 8, 2019</div>
+                                <div class="dropdown-notifications-item-content-text">Critical system failure, systems shutting down.</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><div class="dropdown-notifications-item-icon bg-success"><i data-feather="user-plus"></i></div>
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-details">December 2, 2019</div>
+                                <div class="dropdown-notifications-item-content-text">New user request. Woody has requested access to the organization.</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-footer" href="#!">View All Alerts</a>
+                    </div>
+                </li>
+                <li class="nav-item dropdown no-caret mr-3 dropdown-notifications">
+                    <a class="btn btn-icon btn-transparent-dark dropdown-toggle" id="navbarDropdownMessages" href="javascript:void(0);" role="button" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><i data-feather="mail"></i></a>
+                    <div class="dropdown-menu dropdown-menu-right border-0 shadow animated--fade-in-up" aria-labelledby="navbarDropdownMessages">
+                        <h6 class="dropdown-header dropdown-notifications-header"><i class="mr-2" data-feather="mail"></i>Message Center</h6>
+                        <a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><img class="dropdown-notifications-item-img" src="https://source.unsplash.com/vTL_qy03D1I/60x60" />
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-text">Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</div>
+                                <div class="dropdown-notifications-item-content-details">Emily Fowler · 58m</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-item" href="#!"
+                            ><img class="dropdown-notifications-item-img" src="https://source.unsplash.com/4ytMf8MgJlY/60x60" />
+                            <div class="dropdown-notifications-item-content">
+                                <div class="dropdown-notifications-item-content-text">Lorem ipsum dolor sit amet, consectetur adipisicing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.</div>
+                                <div class="dropdown-notifications-item-content-details">Diane Chambers · 2d</div>
+                            </div></a
+                        ><a class="dropdown-item dropdown-notifications-footer" href="#!">Read All Messages</a>
+                    </div>
+                </li>
+            </ul>
+        </nav>
+        <div id="layoutSidenav">
+            <div id="layoutSidenav_nav">
+                <nav class="sidenav shadow-right sidenav-light">
+                    <div class="sidenav-menu">
+                        <div class="nav accordion" id="accordionSidenav">
+                            <div class="sidenav-menu-heading">Start</div>
+                            <a class="nav-link" href="javascript:void(0);" data-toggle="collapse" data-target="#collapseDashboards" aria-expanded="true" aria-controls="collapseDashboards"
+                                ><div class="nav-link-icon"><i data-feather="activity"></i></div>
+                                Dashboards
+                                <div class="sidenav-collapse-arrow"><i class="fas fa-angle-down"></i></div
+                            ></a>
+                            <div class="collapse show" id="collapseDashboards" data-parent="#accordionSidenav">
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="index.html">Ingestion process</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="gifgen.html">Gif generation</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="giffile.html">GIFFILE</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="topvec.html">TOPVEC</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="duplicates.html">Duplicate detection</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="tweet.html">Tweet</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link active" href="major-release.html">Major Release</a></nav>
+                            </div>
+                        </div>
+                    </div>
+                </nav>
+            </div>
+            <div id="layoutSidenav_content">
+                <main>
+                    <div class="page-header pb-10 page-header-dark bg-gradient-primary-to-secondary">
+                        <div class="container-fluid">
+                            <div class="page-header-content">
+                                <h1 class="page-header-title">
+                                    <div class="page-header-icon"><i data-feather="upload-cloud"></i></div>
+                                    <span>Major Release</span>
+                                </h1>
+                                <div class="page-header-subtitle">Release workflow</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="container-fluid mt-n10">
+                        <div class="card">
+                            <div class="card-header">Download reports</div>
+                            <div class="card-body">
+                                <div class="form-row align-items-end">
+                                    <div class="form-group col-md-3">
+                                        <label for="downloads_start_date">Start date</label>
+                                        <input class="form-control" id="downloads_start_date" type="date" value="2023-12-07" />
+                                    </div>
+                                    <div class="form-group col-md-3">
+                                        <label for="downloads_end_date">End date</label>
+                                        <input class="form-control" id="downloads_end_date" type="date" value="2023-12-30" />
+                                    </div>
+                                    <div class="form-group col-md-2">
+                                        <button class="btn btn-primary btn-block" id="downloads_run_all_button" type="button" onclick="loadAllDownloadsReports()">Run all</button>
+                                    </div>
+                                    <div class="form-group col-md-2">
+                                        <button class="btn btn-success btn-block" id="downloads_build_button" type="button" onclick="buildDownloadsBy()">Build DownloadsBy</button>
+                                    </div>
+                                    <div class="form-group col-md-2">
+                                        <button class="btn btn-outline-secondary btn-block" id="statistics_revert_button" type="button" onclick="revertStatistics()">Revert</button>
+                                    </div>
+                                </div>
+                                <div class="small text-muted" id="statistics_revert_status"></div>
+                                <div class="progress mt-2" style="height: 20px; display: none;" id="downloads_build_progress_wrap">
+                                    <div class="progress-bar progress-bar-striped progress-bar-animated" id="downloads_build_progress" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card mt-4">
+                            <div class="card-header">Hit by log</div>
+                            <div class="card-body">
+                                <div class="form-row align-items-end">
+                                    <div class="form-group col-md-4">
+                                        <label>Log folder</label>
+                                        <label class="btn btn-outline-primary btn-block mb-0" for="hit_log_folder_picker">Choose a folder</label>
+                                        <input type="file" id="hit_log_folder_picker" webkitdirectory directory multiple style="display:none;" onchange="setHitLogFolder(this)" />
+                                    </div>
+                                    <div class="form-group col-md-3">
+                                        <button class="btn btn-primary btn-block" id="hit_log_analysis_button" type="button" onclick="analyzeHitLogs()">Analysis log</button>
+                                    </div>
+                                    <div class="form-group col-md-5">
+                                        <div class="small text-muted" id="hit_log_selected_status">No folder selected.</div>
+                                    </div>
+                                </div>
+                                <div class="small text-muted" id="hit_log_status"></div>
+                            </div>
+                        </div>
+                        <div class="card mt-4">
+                            <div class="card-header d-flex align-items-center justify-content-between">
+                                <span>Downloads per Quarter</span>
+                                <div class="btn-group btn-group-sm" role="group">
+                                    <button class="btn btn-primary" id="downloads_quarter_button" type="button" onclick="loadDownloadsPerQuarterChart()">Run</button>
+                                    <button class="btn btn-success" id="downloads_quarter_build_button" type="button" onclick="buildDownloadsPerQuarter()">Build</button>
+                                    <button class="btn btn-outline-secondary" id="downloads_quarter_revert_button" type="button" onclick="revertDownloadsPerQuarter()">Revert</button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="d-flex justify-content-between mb-3">
+                                    <div class="small text-muted" id="downloads_quarter_status"></div>
+                                    <div class="font-weight-600">Neuron Files: <span id="downloads_quarter_neuron_total">0</span> | Auxillary Files: <span id="downloads_quarter_aux_total">0</span></div>
+                                </div>
+                                <div id="downloads_quarter_chart" class="downloads-quarter-chart"></div>
+                            </div>
+                        </div>
+                        <div class="row mt-4">
+                                    <div class="col-xl-6 mb-4">
+                                        <div class="card h-100">
+                                            <div class="card-header d-flex align-items-center justify-content-between">
+                                                <span>Downloads by Animal Species</span>
+                                                <button class="btn btn-primary btn-sm" id="downloads_species_button" type="button" onclick="loadDownloadsReport('species')">Run</button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between mb-3">
+                                                    <div class="small text-muted" id="downloads_species_status"></div>
+                                                    <div class="font-weight-600">Totalcell: <span id="downloads_species_total_cells">0</span> | Totalnumber: <span id="downloads_species_total">0</span></div>
+                                                </div>
+                                                <div class="table-responsive downloads-report-table">
+                                                    <table class="table table-bordered table-hover mb-0" id="downloads_species_table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('species', 'label')">Species</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('species', 'NumberOfCells')">No. of Cells</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('species', 'Totalnumber')">Totalnumber</button></th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody></tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-xl-6 mb-4">
+                                        <div class="card h-100">
+                                            <div class="card-header d-flex align-items-center justify-content-between">
+                                                <span>Downloads by Cell Type</span>
+                                                <button class="btn btn-primary btn-sm" id="downloads_cell_type_button" type="button" onclick="loadDownloadsReport('cell_type')">Run</button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between mb-3">
+                                                    <div class="small text-muted" id="downloads_cell_type_status"></div>
+                                                    <div class="font-weight-600">Totalcell: <span id="downloads_cell_type_total_cells">0</span> | Totalnumber: <span id="downloads_cell_type_total">0</span></div>
+                                                </div>
+                                                <div class="table-responsive downloads-report-table">
+                                                    <table class="table table-bordered table-hover mb-0" id="downloads_cell_type_table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('cell_type', 'label')">Cell Type</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('cell_type', 'NumberOfCells')">No. of Cells</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('cell_type', 'Totalnumber')">Totalnumber</button></th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody></tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-xl-6 mb-4">
+                                        <div class="card h-100">
+                                            <div class="card-header d-flex align-items-center justify-content-between">
+                                                <span>Downloads by Archive</span>
+                                                <button class="btn btn-primary btn-sm" id="downloads_archive_button" type="button" onclick="loadDownloadsReport('archive')">Run</button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between mb-3">
+                                                    <div class="small text-muted" id="downloads_archive_status"></div>
+                                                    <div class="font-weight-600">Totalcell: <span id="downloads_archive_total_cells">0</span> | Totalnumber: <span id="downloads_archive_total">0</span></div>
+                                                </div>
+                                                <div class="table-responsive downloads-report-table">
+                                                    <table class="table table-bordered table-hover mb-0" id="downloads_archive_table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('archive', 'label')">Archive</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('archive', 'NumberOfCells')">No. of Cells</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('archive', 'Totalnumber')">Totalnumber</button></th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody></tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div class="col-xl-6 mb-4">
+                                        <div class="card h-100">
+                                            <div class="card-header d-flex align-items-center justify-content-between">
+                                                <span>Downloads by Brain Region</span>
+                                                <button class="btn btn-primary btn-sm" id="downloads_brain_region_button" type="button" onclick="loadDownloadsReport('brain_region')">Run</button>
+                                            </div>
+                                            <div class="card-body">
+                                                <div class="d-flex justify-content-between mb-3">
+                                                    <div class="small text-muted" id="downloads_brain_region_status"></div>
+                                                    <div class="font-weight-600">Totalcell: <span id="downloads_brain_region_total_cells">0</span> | Totalnumber: <span id="downloads_brain_region_total">0</span></div>
+                                                </div>
+                                                <div class="table-responsive downloads-report-table">
+                                                    <table class="table table-bordered table-hover mb-0" id="downloads_brain_region_table">
+                                                        <thead>
+                                                            <tr>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('brain_region', 'label')">Brain Region</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('brain_region', 'NumberOfCells')">No. of Cells</button></th>
+                                                                <th><button class="btn btn-link btn-sm p-0 font-weight-600" type="button" onclick="sortDownloadsReport('brain_region', 'Totalnumber')">Totalnumber</button></th>
+                                                            </tr>
+                                                        </thead>
+                                                        <tbody></tbody>
+                                                    </table>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                        </div>
+                    </div>
+                </main>
+                <footer class="footer mt-auto footer-light">
+                    <div class="container-fluid">
+                        <div class="row">
+                            <div class="col-md-6 small">Copyright &copy; NeuroMorpho.Org 2020</div>
+                            <div class="col-md-6 text-md-right small">
+                                <a href="#!">Privacy Policy</a>
+                                &middot;
+                                <a href="#!">Terms &amp; Conditions</a>
+                            </div>
+                        </div>
+                    </div>
+                </footer>
+            </div>
+        </div>
+        <script src="https://code.jquery.com/jquery-3.4.1.min.js" crossorigin="anonymous"></script>
+        <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
+        <script src="https://code.highcharts.com/highcharts.js"></script>
+        <script src="js/scripts.js"></script>
+        <script src="js/major-release.js"></script>
+    </body>
+</html>

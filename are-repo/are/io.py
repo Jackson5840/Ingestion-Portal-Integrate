@@ -316,7 +316,7 @@ def populateresult(result,archive):
         newres.append(item)
     return newres
         
-def getfiles(foldername):
+def getfiles(foldername, steps=None):
     """ Takes one archive (folder aanme) as input, fetches files and distributes.
     For the archive from mounted smb dir as defined in are.cfg
     First get the name of the archive as in csv file
@@ -324,6 +324,13 @@ def getfiles(foldername):
      5) Fetch images.
      b) store on new server as data/archive/date(ISO)/filetypedir/file.xxx
      c) update status for each neuron in ingestion table as 'data imported (Ready)'"""
+    steps = steps or {}
+    copy_files = steps.get('copy_files', True)
+    source_files = steps.get('source_files', True)
+    precheck_files = steps.get('precheck', True)
+    pvec_files = steps.get('pvec', True)
+    duplicate_check = steps.get('duplicates', True) and pvec_files
+    set_ready = steps.get('set_ready', True)
     archive = namefromfolder(foldername)
     result = {'status': 'success', 'message': 'Archive read successfully'}
     #reading status
@@ -342,7 +349,7 @@ def getfiles(foldername):
 
         ares = com.getarchiveingestionstatus(foldername) #TODO must select subset of archive that has not been 
 
-        if ares and ares["status"] in ['read','partial','ingested']:
+        if ares and ares["status"] in ['read','partial','ingested'] and all([copy_files, source_files, precheck_files, pvec_files, duplicate_check, set_ready]):
             result = ares
         else:
         
@@ -352,49 +359,62 @@ def getfiles(foldername):
             dstmetapath = os.path.join(cfg.metapath, foldername)
             
             
-            if os.path.exists(dstpath):
-                deleteallfiles(dstpath)
-            if os.path.exists(dstmetapath):
-                deleteallfiles(dstmetapath)
-            #reading status
-            set_read_progress(15, 'Preparing destination folders')
-            #add ignore pattern for scrcpath, ignoring source folder.
-            ignorepattern =  shutil.ignore_patterns('Source-Version','Standardization log')
-
-            shutil.copytree(srcpath,dstpath,ignore=ignorepattern)
-            # reading status
-            set_read_progress(35, 'Copied archive files')
-
             lswcdir = os.path.join(cfg.datapath,foldername,'CNG Version/')
             rstddir = os.path.join(cfg.remotepath,foldername + '_Final','Standardization log/')
             lstddir = os.path.join(cfg.datapath,foldername,'Standardization log/')
-            if not os.path.isdir(lswcdir):
-                os.rename(cfg.datapath,foldername,'CNG version/',lswcdir)
-            shutil.copytree(srcmetapath,dstmetapath)
+            if copy_files:
+                if os.path.exists(dstpath):
+                    deleteallfiles(dstpath)
+                if os.path.exists(dstmetapath):
+                    deleteallfiles(dstmetapath)
+                #reading status
+                set_read_progress(15, 'Preparing destination folders')
+                #add ignore pattern for scrcpath, ignoring source folder.
+                ignorepattern =  shutil.ignore_patterns('Source-Version','Standardization log')
+
+                shutil.copytree(srcpath,dstpath,ignore=ignorepattern)
+                # reading status
+                set_read_progress(35, 'Copied archive files')
+
+                if not os.path.isdir(lswcdir):
+                    os.rename(cfg.datapath,foldername,'CNG version/',lswcdir)
+                shutil.copytree(srcmetapath,dstmetapath)
+            else:
+                if not os.path.isdir(dstpath):
+                    raise FileNotFoundError('Archive folder does not exist: {}'.format(dstpath))
+                if not os.path.isdir(dstmetapath):
+                    raise FileNotFoundError('Metadata folder does not exist: {}'.format(dstmetapath))
 
             # reading status
-            set_read_progress(50, 'Copied metadata files')
-            getsourcefiles(os.path.join(cfg.remotepath,foldername + '_Final','Source-Version/'),os.path.join(cfg.datapath,foldername,'Source-Version/'),dstmetapath,lswcdir,rstddir,lstddir)
+            set_read_progress(50, 'Copied metadata files' if copy_files else 'Using existing archive files')
+            if source_files:
+                getsourcefiles(os.path.join(cfg.remotepath,foldername + '_Final','Source-Version/'),os.path.join(cfg.datapath,foldername,'Source-Version/'),dstmetapath,lswcdir,rstddir,lstddir)
 
             # reading status
-            set_read_progress(65, 'Copied source files')
+            set_read_progress(65, 'Copied source files' if source_files else 'Skipped source files')
 
-            prechecks(dstpath,dstmetapath,foldername)
+            if precheck_files:
+                prechecks(dstpath,dstmetapath,foldername)
 
             # reading status
-            set_read_progress(75, 'Finished prechecks')
+            set_read_progress(75, 'Finished prechecks' if precheck_files else 'Skipped prechecks')
 
             #lgifdir = os.path.join(cfg.datapath, archive,'rotatingImages/')
             #os.mkdir(lgifdir)
             # commented out rightnow
             #gifgen.gifgen(lswcdir,lgifdir)
 
-            data = readpvecmes(foldername)
+            duplicateresult = []
+            if pvec_files:
+                data = readpvecmes(foldername)
 
-            # reading status
-            set_read_progress(85, 'Prepared morphology data')
+                # reading status
+                set_read_progress(85, 'Prepared morphology data')
 
-            duplicateresult = checkduplicatesinternal(data,cfg.pcalim,cfg.similaritylim)
+                if duplicate_check:
+                    duplicateresult = checkduplicatesinternal(data,cfg.pcalim,cfg.similaritylim)
+            else:
+                set_read_progress(85, 'Skipped pvec and duplicate check')
 
 
             #duplicateresult = 0
@@ -427,7 +447,8 @@ def getfiles(foldername):
                     })
             # reading status
             set_read_progress(95, 'Finalizing archive status')
-            setready(dstpath,archive,duplicateresult,foldername)
+            if set_ready:
+                setready(dstpath,archive,duplicateresult,foldername)
             # reading status
             set_read_progress(100, 'Archive read complete', 'success')
 
@@ -476,6 +497,99 @@ def genarchivegifs(foldername):
     except Exception:
         result = {"status": "error"}
         logging.exception("Error generating gifs")
+    return result
+
+def genarchivegifs_frompath(swcdir, outputdir, job_id, threads=12, resume=False):
+    r = redis.Redis(
+        host=os.getenv('REDIS_HOST', 'localhost'),
+        port=int(os.getenv('REDIS_PORT', '6379')),
+        db=int(os.getenv('REDIS_DB', '0')),
+    )
+    try:
+        if not os.path.exists(outputdir):
+            os.makedirs(outputdir)
+        gifgen.gifgen(swcdir, outputdir, job_id, skip_transfer=True, threads=threads, resume=resume)
+        status = r.get("{}_gif_status".format(job_id))
+        status = status.decode() if isinstance(status, bytes) else status
+        if status != 'stopped':
+            status = 'success'
+            r.set("{}_gif_status".format(job_id), status)
+        result = {"status": status}
+        logging.info("gifs generated from path: " + str(result))
+    except Exception:
+        r.set("{}_gif_status".format(job_id), 'error')
+        result = {"status": "error"}
+        logging.exception("Error generating gifs from path")
+    return result
+
+def genpvecs_frompath(swcdir, outputdir, job_id, threads=1):
+    r = redis.Redis(
+        host=os.getenv('REDIS_HOST', 'localhost'),
+        port=int(os.getenv('REDIS_PORT', '6379')),
+        db=int(os.getenv('REDIS_DB', '0')),
+    )
+    try:
+        if not os.path.exists(outputdir):
+            os.makedirs(outputdir)
+
+        swcfiles = sorted([item for item in os.listdir(swcdir) if item.lower().endswith('.swc')])
+        total = len(swcfiles)
+        if total == 0:
+            raise FileNotFoundError('No .swc files found in {}'.format(swcdir))
+        threads = max(1, min(32, int(threads)))
+
+        r.set("{}_pvec_status".format(job_id), 'running')
+        r.set("{}_pvec_progress".format(job_id), 0)
+        r.set("{}_pvec_current".format(job_id), 0)
+        r.set("{}_pvec_total".format(job_id), total)
+        r.set("{}_pvec_message".format(job_id), 'Clearing pvec workspace')
+
+        pvecurl = cfg.pvecurl
+        requests.get(pvecurl + 'clearpvecs').raise_for_status()
+
+        for index, item in enumerate(swcfiles, start=1):
+            r.set("{}_pvec_current".format(job_id), index)
+            r.set("{}_pvec_progress".format(job_id), (index - 1) / total * 70)
+            r.set("{}_pvec_message".format(job_id), 'Uploading {}'.format(item))
+            with open(os.path.join(swcdir, item), 'rb') as handle:
+                requests.post(pvecurl + 'sendfile', files={'file': handle}).raise_for_status()
+
+        r.set("{}_pvec_progress".format(job_id), 75)
+        r.set("{}_pvec_message".format(job_id), 'Calculating pvecs with {} thread(s)'.format(threads))
+        calc_response = requests.get(pvecurl + 'calcpvecs', params={'threads': threads})
+        calc_response.raise_for_status()
+        calc_result = calc_response.json()
+
+        r.set("{}_pvec_progress".format(job_id), 90)
+        r.set("{}_pvec_message".format(job_id), 'Writing pvec files')
+        response = requests.get(pvecurl + 'getjson')
+        response.raise_for_status()
+        pvecs = response.json().get('pvecs', {})
+        if not pvecs:
+            raise RuntimeError('PVec service returned 0 generated files')
+
+        for neuron_name, pvec in pvecs.items():
+            output_path = os.path.join(outputdir, neuron_name + '.CNG.pvec')
+            with open(output_path, 'w') as pfile:
+                pfile.write('{} {}\n'.format(pvec['distance'], pvec['Sfactor']))
+                pfile.write(' '.join([str(item) for item in pvec['vector']]))
+
+        r.set("{}_pvec_status".format(job_id), 'success')
+        r.set("{}_pvec_progress".format(job_id), 100)
+        r.set("{}_pvec_current".format(job_id), total)
+        skipped_count = calc_result.get('skipped_count', 0)
+        r.set("{}_pvec_message".format(job_id), 'PVec files generated: {}, skipped: {}'.format(len(pvecs), skipped_count))
+        result = {"status": "success", "generated": len(pvecs), "skipped": skipped_count}
+        logging.info("pvecs generated from path: " + str(result))
+        if skipped_count:
+            logging.warning("pvec skipped files: " + str(calc_result.get('skipped', [])))
+    except Exception:
+        r.set("{}_pvec_status".format(job_id), 'error')
+        r.set("{}_pvec_message".format(job_id), 'Error generating pvecs')
+        result = {"status": "error"}
+        logging.exception("Error generating pvecs from path")
+    finally:
+        r.delete('topvec_lock')
     return result
 
 def passpath(pathname):
@@ -904,8 +1018,7 @@ def revertarchive(foldername):
         measids = com.getarchivemeasurements(archive)
         if neuronarr:
             com.cleanupmyarchiveextras(neuronarr)
-        com.deleteingestedneurons(neuronarr)
-        com.deletemyarchive(archive)
+        com.deletemyarchivecascade(archive)
         com.deletearchive(foldername,neuronarr)
         com.deletemeasurements(measids)
         
@@ -927,8 +1040,7 @@ def deingestarchive(foldername):
         measids = com.getarchivemeasurements(archive)
         if neuronarr:
             com.cleanupmyarchiveextras(neuronarr)
-        com.deleteingestedneurons(neuronarr)
-        com.deletemyarchive(archive)
+        com.deletemyarchivecascade(archive)
         com.deletearchiveingestion(foldername)
         com.deletemeasurements(measids)
         
@@ -957,9 +1069,7 @@ def revertfrommain(foldername):
 
         if neuronarr:
             com.cleanupmyarchiveextras(neuronarr)
-        if neuronarr:
-            com.deleteingestedneurons(neuronarr)
-        com.deletemyarchive(archive)
+        com.deletemyarchivecascade(archive)
 
         main_data_dir = os.path.join(cfg.sshmaindir, 'dableFiles', archive.lower())
         main_image_dir = os.path.join(cfg.sshmaindir, 'images', 'imageFiles', archive)
