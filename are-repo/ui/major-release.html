@@ -187,10 +187,13 @@
                                         <label class="btn btn-outline-primary btn-block mb-0" for="hit_log_folder_picker">Choose a folder</label>
                                         <input type="file" id="hit_log_folder_picker" webkitdirectory directory multiple style="display:none;" onchange="setHitLogFolder(this)" />
                                     </div>
-                                    <div class="form-group col-md-3">
+                                    <div class="form-group col-md-2">
                                         <button class="btn btn-primary btn-block" id="hit_log_analysis_button" type="button" onclick="analyzeHitLogs()">Analysis log</button>
                                     </div>
-                                    <div class="form-group col-md-5">
+                                    <div class="form-group col-md-2">
+                                        <button class="btn btn-outline-secondary btn-block" id="hit_log_revert_button" type="button" onclick="revertHitLogStatistics()">Revert</button>
+                                    </div>
+                                    <div class="form-group col-md-4">
                                         <div class="small text-muted" id="hit_log_selected_status">No folder selected.</div>
                                     </div>
                                 </div>

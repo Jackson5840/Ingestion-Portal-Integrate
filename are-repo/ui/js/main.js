@@ -820,6 +820,145 @@ function getanarchive(archive_name) {
     return activearchives[ix];
     
 }
+
+var archiveJobPollers = {};
+
+function escapeHtml(text) {
+    return $('<div>').text(text == null ? '' : text).html();
+}
+
+function updateArchiveJobProgress(archive_name, job, result) {
+    var prefix = archive_name + '_' + job;
+    var wrap = document.getElementById(prefix + '_progress_wrap');
+    if (!wrap) {
+        return;
+    }
+    var progress = Math.max(0, Math.min(100, parseFloat(result.progress || 0)));
+    var current = parseInt(result.current || 0);
+    var total = parseInt(result.total || 0);
+    var status = result.status || 'idle';
+    var message = result.message || '';
+    var progressBar = document.getElementById(prefix + '_progress');
+    var progressText = document.getElementById(prefix + '_progress_text');
+    var logElem = document.getElementById(prefix + '_progress_log');
+    var stopButton = document.getElementById(prefix + '_stop');
+    var latestElem = document.getElementById(prefix + '_progress_latest');
+    var toggleButton = document.getElementById(prefix + '_log_toggle');
+
+    wrap.style.display = 'block';
+    progressBar.style.width = progress + '%';
+    progressBar.textContent = Math.round(progress) + '%';
+    progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-info';
+    if (status === 'success') {
+        progressBar.className = 'progress-bar bg-success';
+    } else if (status === 'error') {
+        progressBar.className = 'progress-bar bg-danger';
+    } else if (status === 'stopped') {
+        progressBar.className = 'progress-bar bg-warning';
+    } else if (status === 'stopping') {
+        progressBar.className = 'progress-bar progress-bar-striped progress-bar-animated bg-warning';
+    }
+
+    var countText = total > 0 ? ' (' + current + ' / ' + total + ')' : '';
+    progressText.textContent = message + countText;
+    if (stopButton) {
+        stopButton.disabled = false;
+        if (status === 'stopped') {
+            stopButton.textContent = 'Resume';
+            stopButton.className = 'btn btn-success btn-sm ml-2';
+            stopButton.onclick = function () {
+                resumeArchiveJob(archive_name, job);
+            };
+        } else if (status === 'running' || status === 'stopping') {
+            stopButton.textContent = status === 'stopping' ? 'Stopping...' : 'Stop';
+            stopButton.className = status === 'stopping' ? 'btn btn-warning btn-sm ml-2' : 'btn btn-outline-danger btn-sm ml-2';
+            stopButton.disabled = status === 'stopping';
+            stopButton.onclick = function () {
+                stopArchiveJob(archive_name, job);
+            };
+        } else {
+            stopButton.textContent = 'Stop';
+            stopButton.className = 'btn btn-outline-secondary btn-sm ml-2';
+            stopButton.disabled = true;
+            stopButton.onclick = function () {
+                stopArchiveJob(archive_name, job);
+            };
+        }
+    }
+    if (logElem && result.log) {
+        var logItems = result.log.slice(-20);
+        logElem.innerHTML = logItems.map(function (item) {
+            return '<div class="py-1 border-bottom">' + escapeHtml(item) + '</div>';
+        }).join('');
+        if (latestElem) {
+            latestElem.textContent = logItems.length ? logItems[logItems.length - 1] : '';
+        }
+        if (toggleButton) {
+            toggleButton.style.display = logItems.length ? 'inline-block' : 'none';
+        }
+    }
+}
+
+function toggleArchiveJobLog(archive_name, job) {
+    var prefix = archive_name + '_' + job;
+    var logElem = document.getElementById(prefix + '_progress_log');
+    var toggleButton = document.getElementById(prefix + '_log_toggle');
+    if (!logElem || !toggleButton) {
+        return;
+    }
+    var hidden = logElem.style.display === 'none' || logElem.style.display === '';
+    logElem.style.display = hidden ? 'block' : 'none';
+    toggleButton.textContent = hidden ? 'Hide log' : 'Show log';
+}
+
+function stopArchiveJob(archive_name, job) {
+    var endpoint = job === 'ingest' ? 'stopingestarchive/' : 'stopexporttomain/';
+    $.ajax({
+        url: serverbase + endpoint + archive_name,
+        type: 'POST',
+        success: function (result) {
+            updateArchiveJobProgress(archive_name, job, result);
+        }
+    });
+}
+
+function resumeArchiveJob(archive_name, job) {
+    if (job === 'ingest') {
+        ingestallneurons(archive_name);
+    } else {
+        exporttomain(archive_name);
+    }
+}
+
+function pollArchiveJob(archive_name, job, buttonId, successText, stoppedText, errorText) {
+    var endpoint = job === 'ingest' ? 'checkingestarchive/' : 'checkexporttomain/';
+    var pollKey = archive_name + '_' + job;
+    if (archiveJobPollers[pollKey]) {
+        clearTimeout(archiveJobPollers[pollKey]);
+    }
+    $.ajax({
+        url: serverbase + endpoint + archive_name,
+        type: 'GET',
+        success: function (result) {
+            updateArchiveJobProgress(archive_name, job, result);
+            if (result.status === 'running' || result.status === 'stopping') {
+                archiveJobPollers[pollKey] = setTimeout(function () {
+                    pollArchiveJob(archive_name, job, buttonId, successText, stoppedText, errorText);
+                }, 2000);
+            } else {
+                $('#' + buttonId).prop('disabled', false);
+                if (result.status === 'success') {
+                    $('#' + buttonId).html(successText);
+                } else if (result.status === 'stopped') {
+                    $('#' + buttonId).html(stoppedText);
+                } else if (result.status === 'error') {
+                    $('#' + buttonId).html(errorText);
+                }
+            }
+        }
+    });
+}
+
 function ingestallneurons(archive_name) {
     $('#' + archive_name + '_ibutton').prop('disabled', true)
     $('#' + archive_name + '_ibutton').html(
@@ -830,21 +969,18 @@ function ingestallneurons(archive_name) {
 		error: function () {
 			console.log("Error!");
 		},
-		success: function (result) {
-            console.log(result)
-            if (result['status'] == 'success') {
-                $('#' + archive_name + '_ibutton').html(
-                    `Ingested successfully to review`
-                );	
-                
-            } else {
-                $('#' + archive_name + '_ibutton').html(
-                    `Ingestion failed`
-                );	
-                
-            }
-            
-		},
+			success: function (result) {
+	            console.log(result)
+	            if (['started', 'running'].includes(result['status'])) {
+                    pollArchiveJob(archive_name, 'ingest', archive_name + '_ibutton', 'Ingested successfully to review', 'Ingest stopped', 'Ingestion failed');
+	            } else if (result['status'] == 'success') {
+	                $('#' + archive_name + '_ibutton').html(`Ingested successfully to review`);
+	            } else {
+                    $('#' + archive_name + '_ibutton').prop('disabled', false)
+	                $('#' + archive_name + '_ibutton').html(`Ingestion failed`);
+	            }
+	            
+			},
 		type: 'GET'
     });
 
@@ -967,21 +1103,18 @@ function exporttomain(archive_name) {
 		error: function () {
 			console.log("Error!");
 		},
-		success: function (result) {
-            console.log(result)
-            if (result['status'] == 'success') {
-                $('#' + archive_name + '_mbutton').html(
-                    `Exported successfully to main`
-                );	
-                
-            } else {
-                $('#' + archive_name + '_mbutton').html(
-                    `Exported to main failed`
-                );	
-                
-            }
-            
-		},
+			success: function (result) {
+	            console.log(result)
+	            if (['started', 'running'].includes(result['status'])) {
+                    pollArchiveJob(archive_name, 'exportmain', archive_name + '_mbutton', 'Exported successfully to main', 'Export stopped', 'Exported to main failed');
+	            } else if (result['status'] == 'success') {
+	                $('#' + archive_name + '_mbutton').html(`Exported successfully to main`);
+	            } else {
+                    $('#' + archive_name + '_mbutton').prop('disabled', false)
+	                $('#' + archive_name + '_mbutton').html(`Exported to main failed`);
+	            }
+	            
+			},
 		type: 'GET'
     }); 
 }
@@ -1075,6 +1208,34 @@ function createDataPanel(archives){
         
         </tr>
         </table>
+        <div id="${archive.name}_ingest_progress_wrap" class="mt-2 px-2 py-2 bg-light rounded" style="display:none;">
+            <div class="d-flex align-items-center">
+                <div class="progress flex-grow-1" style="height:18px;">
+                    <div id="${archive.name}_ingest_progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width:0%">0%</div>
+                </div>
+                <button id="${archive.name}_ingest_stop" class="btn btn-outline-danger btn-sm ml-2" type="button" onclick="stopArchiveJob('${archive.name}', 'ingest')">Stop</button>
+            </div>
+            <div class="d-flex align-items-center mt-1">
+                <div id="${archive.name}_ingest_progress_text" class="small text-muted flex-grow-1"></div>
+                <button id="${archive.name}_ingest_log_toggle" class="btn btn-link btn-sm p-0 ml-2" type="button" style="display:none;" onclick="toggleArchiveJobLog('${archive.name}', 'ingest')">Show log</button>
+            </div>
+            <div class="small text-muted text-truncate" title="" id="${archive.name}_ingest_progress_latest"></div>
+            <div id="${archive.name}_ingest_progress_log" class="small text-monospace text-muted mt-1 pl-2" style="display:none; max-height:140px; overflow:auto;"></div>
+        </div>
+        <div id="${archive.name}_exportmain_progress_wrap" class="mt-2 px-2 py-2 bg-light rounded" style="display:none;">
+            <div class="d-flex align-items-center">
+                <div class="progress flex-grow-1" style="height:18px;">
+                    <div id="${archive.name}_exportmain_progress" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width:0%">0%</div>
+                </div>
+                <button id="${archive.name}_exportmain_stop" class="btn btn-outline-danger btn-sm ml-2" type="button" onclick="stopArchiveJob('${archive.name}', 'exportmain')">Stop</button>
+            </div>
+            <div class="d-flex align-items-center mt-1">
+                <div id="${archive.name}_exportmain_progress_text" class="small text-muted flex-grow-1"></div>
+                <button id="${archive.name}_exportmain_log_toggle" class="btn btn-link btn-sm p-0 ml-2" type="button" style="display:none;" onclick="toggleArchiveJobLog('${archive.name}', 'exportmain')">Show log</button>
+            </div>
+            <div class="small text-muted text-truncate" title="" id="${archive.name}_exportmain_progress_latest"></div>
+            <div id="${archive.name}_exportmain_progress_log" class="small text-monospace text-muted mt-1 pl-2" style="display:none; max-height:140px; overflow:auto;"></div>
+        </div>
         </div>
         <div id="collapse${archive.name}" class="panel-collapse collapse" style="">
         <div class="card-body" style="overflow: visible">
@@ -1176,8 +1337,19 @@ function deleteneurons(archive) {
 
             // Print received data from server
             console.log(this.responseText);
-            $('#' + archive + '_rbutton').html(
-            `Archive reverted`);
+            let result = {};
+            try {
+                result = JSON.parse(this.responseText);
+            } catch (e) {
+                result = {status: 'error', message: this.responseText || 'Unknown revert error'};
+            }
+            if (result.status === 'error') {
+                $('#' + archive + '_rbutton').prop('disabled', false);
+                $('#' + archive + '_rbutton').html(`Revert failed`);
+                window.alert(result.message || 'Archive revert failed');
+                return;
+            }
+            $('#' + archive + '_rbutton').html(`Archive reverted`);
             setTimeout(() => {  
                 activearchives = JSON.parse(getarchives());
                 if (activearchives.status == 'error') {

@@ -11,6 +11,24 @@ from . import io
 logging.basicConfig(level=logging.INFO,filename='app.log', filemode='w', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
 
 
+def read_text_lines(path):
+    try:
+        with open(path, encoding='utf-8') as fp:
+            return fp.readlines()
+    except UnicodeDecodeError:
+        logging.warning("Reading %s as ISO-8859-1 because UTF-8 decoding failed", path)
+        with open(path, encoding='ISO-8859-1') as fp:
+            return fp.readlines()
+
+
+def read_csv_compatible(path, **kwargs):
+    try:
+        return pd.read_csv(path, encoding='utf-8', **kwargs)
+    except UnicodeDecodeError:
+        logging.warning("Reading %s as ISO-8859-1 because UTF-8 decoding failed", path)
+        return pd.read_csv(path, encoding='ISO-8859-1', **kwargs)
+
+
 def representint(s):
     try: 
         int(s)
@@ -187,7 +205,7 @@ def readmeasurements(foldername):
             continue
         if filename.find('csv') != -1:
             csvFilePath = os.path.join(measurementPath, filename)
-            measurementsDataFrame = pd.read_csv(csvFilePath, header=0)
+            measurementsDataFrame = read_csv_compatible(csvFilePath, header=0)
             if filename[-7] == '-':
                 label = filename[-6:-4]
             else:
@@ -199,7 +217,7 @@ def readmetadata(archivename):
     # read metadata from file, assign dict values to dict of metadata labels
     # if only one group, assign dict values to dict with label 'default'
     filepath = os.path.join(cfg.metapath,archivename,archivename + '.csv')
-    anmdf = pd.read_csv(filepath,header=0)
+    anmdf = read_csv_compatible(filepath, header=0)
     (rows,cols) = anmdf.shape
     metadict = {}
     if cols > 2:
@@ -310,31 +328,30 @@ def neurondomains(neuron_name,neuronmeta):
     maxrad = -10000
     noDim = True
     firstRead = True
-    with open(filename) as fp: 
-        lines = fp.readlines()
-        domaincount = [0] * 8
-        for line in lines:
-            if line[0] == '#' or len(line) < 3:
-                continue
-            else:
-                elems = line.strip().split()
-                if firstRead and int(elems[1]) != 1:
-                    prevradius = float(elems[5]) 
-                    firstRead = False
-                domaincount[int(elems[1])] += 1
-                if maxrad < float(elems[4]):
-                    maxrad = float(elems[4])
-                if minrad > float(elems[4]):
-                    minrad = float(elems[4])
+    lines = read_text_lines(filename)
+    domaincount = [0] * 8
+    for line in lines:
+        if line[0] == '#' or len(line) < 3:
+            continue
+        else:
+            elems = line.strip().split()
+            if firstRead and int(elems[1]) != 1:
+                prevradius = float(elems[5]) 
+                firstRead = False
+            domaincount[int(elems[1])] += 1
+            if maxrad < float(elems[4]):
+                maxrad = float(elems[4])
+            if minrad > float(elems[4]):
+                minrad = float(elems[4])
 
-                #hasDim = hasDim or (int(elems[1]) != 1 and float(elems[5]) > 1)
-                if int(elems[1]) != 1:
-                    noDim = noDim and float(elems[5]) == prevradius
-                    # logging.info("noDim is {}".format(noDim))
-                    # logging.info("before noDim is {}".format(noDim))
-                    # logging.info("elem5 is {}".format(elems[5]))
-                    # logging.info("prevradius is {}".format(prevradius))
-                    prevradius = float(elems[5])
+            #hasDim = hasDim or (int(elems[1]) != 1 and float(elems[5]) > 1)
+            if int(elems[1]) != 1:
+                noDim = noDim and float(elems[5]) == prevradius
+                # logging.info("noDim is {}".format(noDim))
+                # logging.info("before noDim is {}".format(noDim))
+                # logging.info("elem5 is {}".format(elems[5]))
+                # logging.info("prevradius is {}".format(prevradius))
+                prevradius = float(elems[5])
         # logging.info("elems is {}".format(elems[1]))
     #3D -  has a variation in diameter
     is3D = maxrad - minrad > 3

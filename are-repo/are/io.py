@@ -1027,6 +1027,7 @@ def revertarchive(foldername):
 
         metadir = os.path.join(cfg.metapath,foldername)
         deleteallfiles(metadir)
+        delete_review_archive_files(archive, neuronarr)
         result = {'message': 'Archive deleted', "status": "success"}
     except Exception as e:
         result = {'message': 'Error: {}'.format(str(e)), "status": "error"}
@@ -1147,6 +1148,39 @@ def deleteallfiles(folder):
         os.rmdir(folder)
     except Exception as e:
         logging.exception('Failed to delete %s. Reason: %s' % (folder, e))
+
+
+def delete_review_archive_files(archive, neuronarr):
+    review_root = os.path.abspath(cfg.sshreviewdir)
+
+    def safe_path(*parts):
+        path = os.path.abspath(os.path.join(review_root, *parts))
+        if path != review_root and path.startswith(review_root + os.sep):
+            return path
+        raise ValueError('Refusing to delete path outside review root: {}'.format(path))
+
+    for folder in [
+        safe_path('dableFiles', archive.lower()),
+        safe_path('images', 'imageFiles', archive),
+    ]:
+        if os.path.exists(folder):
+            shutil.rmtree(folder)
+            logging.info('Deleted review archive folder: %s', folder)
+
+    gifdir = safe_path('rotatingImages')
+    if not os.path.isdir(gifdir):
+        return
+
+    gif_paths = set()
+    for neuron_name in neuronarr or []:
+        gif_paths.add(safe_path('rotatingImages', neuron_name + '.CNG.gif'))
+    for gif_path in glob.glob(os.path.join(gifdir, archive + '_*.CNG.gif')):
+        gif_paths.add(safe_path('rotatingImages', os.path.basename(gif_path)))
+
+    for gif_path in sorted(gif_paths):
+        if os.path.exists(gif_path):
+            os.remove(gif_path)
+            logging.info('Deleted review archive gif: %s', gif_path)
     
 
 def readpvecmes(foldername):
@@ -1327,7 +1361,19 @@ def writeack(ackdict):
     if lab is not None and not isinstance(lab,float):
         if islocal:
             ackpath = cfg.sshdir + 'acknowl.jsp'
-            f = open(ackpath,'r+')
+            ackline = "<p><li><b>{}</b><br>{}<br>{}</li></p>\n".format(lab, ackdict['address1'], ackdict['address2'])
+            with open(ackpath, 'r+', encoding='ISO-8859-1') as sfile:
+                content = sfile.read()
+                if ackline not in content:
+                    insert_at = content.rfind('</ul>')
+                    if insert_at == -1:
+                        content = content + "\n" + ackline
+                    else:
+                        content = content[:insert_at] + ackline + content[insert_at:]
+                    sfile.seek(0)
+                    sfile.write(content)
+                    sfile.truncate()
+            return
         else:
             sftp = create_sftp_client(cfg.sshhost)
             ackpath = cfg.sshdir + 'acknowl.jsp'
@@ -1571,42 +1617,57 @@ class DuplicateException(Exception):
         return(repr(self.value))
 
 
-def exporttomain(foldername):
+def exporttomain(foldername, progress_cb=None, should_stop=None):
     archive = namefromfolder(foldername)
-    status = "success"
-    message = "Neuron exported to main"
-    (resultnames, resultids) = com.getarchiveneurons(archive)  # should be status 3 add new method
-    for item in resultnames:
+    com.clear_checkexists_cache()
+    (resultnames, resultids) = com.getarchiveneurons(archive, skip_public=True)
+    total = len(resultnames)
+    exportednames = []
+    had_error = False
+    if progress_cb:
+        progress_cb(0, total, 'Loaded {} neuron(s) to export'.format(total))
+    for index, item in enumerate(resultnames, start=1):
+        status = "success"
+        message = "Neuron exported to main"
+        if should_stop and should_stop():
+            if progress_cb:
+                progress_cb(index - 1, total, 'Stop requested. Export paused after current neuron.', 'stopped')
+            break
         try:
             status = "public"
             myitem = exportneuron(item)
+            exportednames.append(item)
 
         except mysql.connector.errors.IntegrityError as e:
             # If it's a duplicate entry error
             if '1062' in str(e):
                 print(f"Ignoring duplicated entry error: {e}")
-                continue  # Continue with the next item
+                status = "public"
+                message = "Duplicate already existed in main"
+                exportednames.append(item)
             else:
                 # If it's another type of IntegrityError
                 oldid = 0
                 status = 'error'
                 message = str(e)
+                had_error = True
                 logging.exception("Error during export of neurons to main")
 
         except Exception as e:
             oldid = 0
             status = 'error'
             message = str(e)
+            had_error = True
             logging.exception("Error during export of neurons to main")
 
         finally:
             com.updateneuronstatus(item, status, message)
+            if progress_cb:
+                progress_cb(index, total, 'Exported {} / {}: {}'.format(index, total, item))
 
-    if status == 'error':
-        return []
-    else:
-        pass  # Add an indented block here
-        return resultnames
+    if had_error:
+        logging.warning("Export to main completed with errors for archive {}".format(archive))
+    return exportednames
 
 
 # Original Copy
@@ -2040,29 +2101,29 @@ def transfergif(neuron_name):
 def mapneuronfields(pgdict):
     archdict = {'archive_name': pgdict['archive_name'], 
         'archive_URL': pgdict['archive_url']}
-    archive_id = com.checkexists('archive','archive_name', archdict)
-    species_id = com.checkexists('species','species', {'species': pgdict['species_name']})
-    strain_id = com.checkexists('animal_strain','strain_name', {'strain_name': pgdict['strain_name']})
-    format_id = com.checkexists('original_format','original_format', {
+    archive_id = com.checkexists_cached('archive','archive_name', archdict)
+    species_id = com.checkexists_cached('species','species', {'species': pgdict['species_name']})
+    strain_id = com.checkexists_cached('animal_strain','strain_name', {'strain_name': pgdict['strain_name']})
+    format_id = com.checkexists_cached('original_format','original_format', {
         'original_format': pgdict['reconstruction'] + '.' + pgdict['originalformat_name']})
-    protocol_id = com.checkexists('protocol_design','protocol', {'protocol': pgdict['protocol']})
-    thickness_id = com.checkexists('slicing_thickness','slice_thickness', {'slice_thickness': pgdict['slicingthickness']})
-    slice_direction_id = com.checkexists('slicing_direction','slicing_direction', {'slicing_direction': pgdict['slicing_direction']})
-    stain_id = com.checkexists('staining_method','stain', {'stain': pgdict['staining_name']})
-    magnification_id = com.checkexists('magnification','magnification', {'magnification': pgdict['magnification']})
-    objective_id = com.checkexists('objective_type','objective_type', {'objective_type': pgdict['objective']})
-    reconstruction_id = com.checkexists('reconstruction','reconstruction_software', {'reconstruction_software': pgdict['reconstruction']})
-    age_classification_id = com.checkexists('age_classification','age_class', {'age_class': pgdict['age']})
-    expercond_id = com.checkexists('experimentcondition','expercond', {'expercond': pgdict['expcond_name']})
-    region1_id = com.checkexists('neuron_region1','region1', {'region1': pgdict['region1']})
-    region2_id = com.checkexists('neuron_region2','region2', {'region2': pgdict['region2']})
-    region3_id = com.checkexists('neuron_region3','region3', {'region3': pgdict['region3']})
-    region3B_id = com.checkexists('neuron_region3','region3', {'region3': pgdict['region3B']})
-    class1_id = com.checkexists('neuron_class1','class1', {'class1': pgdict['class1']})
-    class2_id = com.checkexists('neuron_class2','class2', {'class2': pgdict['class2']})
-    class3_id = com.checkexists('neuron_class3','class3', {'class3': pgdict['class3']})
-    class3B_id = com.checkexists('neuron_class3','class3', {'class3': pgdict['class3B']})
-    class3C_id = com.checkexists('neuron_class3','class3', {'class3': pgdict['class3C']})
+    protocol_id = com.checkexists_cached('protocol_design','protocol', {'protocol': pgdict['protocol']})
+    thickness_id = com.checkexists_cached('slicing_thickness','slice_thickness', {'slice_thickness': pgdict['slicingthickness']})
+    slice_direction_id = com.checkexists_cached('slicing_direction','slicing_direction', {'slicing_direction': pgdict['slicing_direction']})
+    stain_id = com.checkexists_cached('staining_method','stain', {'stain': pgdict['staining_name']})
+    magnification_id = com.checkexists_cached('magnification','magnification', {'magnification': pgdict['magnification']})
+    objective_id = com.checkexists_cached('objective_type','objective_type', {'objective_type': pgdict['objective']})
+    reconstruction_id = com.checkexists_cached('reconstruction','reconstruction_software', {'reconstruction_software': pgdict['reconstruction']})
+    age_classification_id = com.checkexists_cached('age_classification','age_class', {'age_class': pgdict['age']})
+    expercond_id = com.checkexists_cached('experimentcondition','expercond', {'expercond': pgdict['expcond_name']})
+    region1_id = com.checkexists_cached('neuron_region1','region1', {'region1': pgdict['region1']})
+    region2_id = com.checkexists_cached('neuron_region2','region2', {'region2': pgdict['region2']})
+    region3_id = com.checkexists_cached('neuron_region3','region3', {'region3': pgdict['region3']})
+    region3B_id = com.checkexists_cached('neuron_region3','region3', {'region3': pgdict['region3B']})
+    class1_id = com.checkexists_cached('neuron_class1','class1', {'class1': pgdict['class1']})
+    class2_id = com.checkexists_cached('neuron_class2','class2', {'class2': pgdict['class2']})
+    class3_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3']})
+    class3B_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3B']})
+    class3C_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3C']})
 
 
     
@@ -2240,7 +2301,7 @@ def transferimages():
         sftp.sshclient.close()
 
 
-def mainrelease(foldername,dt_string):
+def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None):
     # check that archive has status "published"
     # sync arhives using rsync
     # import to mysql all records
@@ -2264,6 +2325,11 @@ def mainrelease(foldername,dt_string):
                         shutil.copy2(srcfile, destfile)
 
     archive = namefromfolder(foldername)
+    def notify(current, total, message, status='running'):
+        if progress_cb:
+            progress_cb(current, total, message, status)
+
+    notify(0, 100, 'Starting main release for {}'.format(archive))
     print("Dt string in main release".format(dt_string))
     if not islocal:
         sftp = create_sftp_client(cfg.sshhost)
@@ -2273,24 +2339,49 @@ def mainrelease(foldername,dt_string):
     logging.info("main release {} *** {}".format(srcdir,destdir))
     logging.info("archive name = {} *** foldername = {} ".format(archive, foldername))
     transferfolder(srcdir,destdir)
+    notify(10, 100, 'Copied dableFiles for {}'.format(archive))
    
     srcdir = cfg.sshdir + "images/imageFiles/{}/".format(archive)
     destdir = cfg.sshmaindir + "images/imageFiles/{}/".format(archive)
     logging.info("main release {} *** {}".format(srcdir,destdir))
     transferfolder(srcdir,destdir)
+    notify(20, 100, 'Copied imageFiles for {}'.format(archive))
 
     srcdir = cfg.sshdir + "rotatingImages/"
     destdir = cfg.sshmaindir + "rotatingImages/"
     logging.info("main release {} *** {}".format(srcdir,destdir))
     transferfolder(srcdir,destdir)
+    notify(35, 100, 'Copied rotatingImages')
     
     srcfile = cfg.sshdir + "acknowl.jsp"
     destfile = cfg.sshmaindir + "acknowl.jsp"
     # transferfolder(srcfile,destfile)
+
+    if should_stop and should_stop():
+        notify(35, 100, 'Stop requested before neuron export', 'stopped')
+        if not islocal:
+            sftp.close()
+            sshc.close()
+        return {'status': 'stopped', 'exported': []}
     
-    neuron_names = exporttomain(foldername)
+    def export_progress(current, total, message, status='running'):
+        if total:
+            scaled = 40 + int((current / total) * 50)
+        else:
+            scaled = 90
+        notify(scaled, 100, message, status)
+
+    neuron_names = exporttomain(foldername, progress_cb=export_progress, should_stop=should_stop)
+    if should_stop and should_stop():
+        notify(90, 100, 'Stop requested. Export paused before final upload-date update.', 'stopped')
+        if not islocal:
+            sftp.close()
+            sshc.close()
+        return {'status': 'stopped', 'exported': neuron_names}
+
     archivestatus = com.getarchiveingestionstatus(foldername)
-    com.updateuploaddate(neuron_names,dt_string,archivestatus["date"])
+    com.updateuploaddate_archive(archive,dt_string,archivestatus["date"])
+    notify(95, 100, 'Updated upload dates for {}'.format(archive))
     # Temporarily disable scrolling text image regeneration and sync.
     # utils.writeimages()
     # transferimages()
@@ -2298,9 +2389,11 @@ def mainrelease(foldername,dt_string):
     #stdin, stdout, stderr = sshc.exec_command('curl "http://localhost:8983/solr/search-Main/dataimport?command=full-import')
     #stdin, stdout, stderr = sshc.exec_command('curl "http://localhost:8983/solr/search-Review/dataimport?command=full-import')
     #stdin, stdout, stderr = sshc.exec_command('curl "http://localhost:8983/solr/neuron/dataimport?command=full-import')
+    notify(100, 100, 'Main release export complete for {}'.format(archive), 'success')
     if not islocal:
         sftp.close()
         sshc.close()
+    return {'status': 'success', 'exported': neuron_names}
 
 def solrcommand(target):
     """

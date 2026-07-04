@@ -220,6 +220,15 @@ function analyzeHitLogs() {
         });
     })
     .then(function(data) {
+        var jspMessage = data.statistics_jsp
+            ? '<br><span class="text-muted">statistics.jsp accumulated: added Hits ' +
+                formatNumber(data.statistics_jsp.hit_delta_total || 0) +
+                ', Hits total ' +
+                formatNumber(data.statistics_jsp.hit_total || 0) +
+                ', country rows ' + formatNumber(data.statistics_jsp.country_rows_updated || 0) +
+                ', country Hits total ' + formatNumber(data.statistics_jsp.country_total_hits || 0) +
+                '.</span>'
+            : '';
         status.innerHTML =
             'Done. Files: ' + data.files_processed +
             ', counted 200 hits: ' + formatNumber(data.lines_counted) +
@@ -228,7 +237,37 @@ function analyzeHitLogs() {
             ', countries resolved: ' + formatNumber(data.countries_resolved || 0) +
             '. <a href="' + data.per_quarter.url + '">perQuarter.xlsx</a>' +
             ' | <a href="' + data.access_country.url + '">AccessCountry.xlsx</a>' +
+            jspMessage +
             '<br><span class="text-muted">' + (data.country_note || '') + '</span>';
+    })
+    .catch(function(error) {
+        status.innerHTML = '<span class="text-danger">' + error.message + '</span>';
+    })
+    .finally(function() {
+        button.disabled = false;
+    });
+}
+
+function revertHitLogStatistics() {
+    var status = document.getElementById('hit_log_status');
+    var button = document.getElementById('hit_log_revert_button');
+
+    button.disabled = true;
+    status.innerHTML = 'Reverting statistics.jsp...';
+
+    fetch(serverbase + 'major_release/revert_statistics', {
+        method: 'POST'
+    })
+    .then(function(response) {
+        return response.json().then(function(data) {
+            if (!response.ok) {
+                throw new Error(data.message || 'Revert failed');
+            }
+            return data;
+        });
+    })
+    .then(function(data) {
+        status.innerHTML = '<span class="text-success">' + (data.message || 'statistics.jsp reverted.') + '</span>';
     })
     .catch(function(error) {
         status.innerHTML = '<span class="text-danger">' + error.message + '</span>';

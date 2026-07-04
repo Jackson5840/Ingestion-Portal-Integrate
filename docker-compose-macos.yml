@@ -1,0 +1,128 @@
+name: ingestion-portal-integrate-macos
+
+services:
+  swc2pvec:
+    build:
+      context: ./swc2pvec
+      dockerfile: Dockerfile
+    ports:
+      - "${SWC2PVEC_PORT:-5017}:5000"
+    restart: unless-stopped
+
+  similarity-search:
+    build:
+      context: ./similarity-search
+      dockerfile: Dockerfile
+    environment:
+      SIS_INIT_ON_STARTUP: "${SIS_INIT_ON_STARTUP:-0}"
+      SIS_MYSQL_HOST: mysql
+      SIS_MYSQL_USER: "${MYSQL_USER:-nmo}"
+      SIS_MYSQL_PASSWORD: "${MYSQL_PASSWORD:-nmo}"
+      SIS_MYSQL_DB: "${SIS_MYSQL_DB:-NeuMO}"
+    ports:
+      - "${SIMILARITY_PORT:-5003}:5000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: unless-stopped
+
+  are:
+    build:
+      context: ./are-repo
+      dockerfile: Dockerfile
+    environment:
+      FLASK_APP: app.py
+      REDIS_HOST: redis
+      ARE_POSTGRES_HOST: postgres
+      ARE_POSTGRES_DB: "${POSTGRES_DB:-nmo}"
+      ARE_POSTGRES_USER: "${POSTGRES_USER:-nmo}"
+      ARE_POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-100neuralDB}"
+      ARE_MYSQL_HOST: mysql
+      ARE_MYSQL_USER: "${MYSQL_USER:-nmo}"
+      ARE_MYSQL_PASSWORD: "${MYSQL_PASSWORD:-nmo}"
+      ARE_MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root}"
+      ARE_MYSQL_DB: "${ARE_MYSQL_DB:-nmdbDev}"
+      ARE_MYSQL_REVIEW_DB: "${ARE_MYSQL_REVIEW_DB:-nmdbDev}"
+      ARE_MYSQL_MAIN_DB: "${ARE_MYSQL_MAIN_DB:-NeuMO}"
+      ARE_EXPORT_ROOT: "${NMO_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/export}"
+      ARE_ARCHIVE_EXPORT_ROOT: "${NMO_ARCHIVE_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/dataexport}"
+      ARE_MAJOR_RELEASE_STATISTICS_JSP: "${NMO_MAJOR_RELEASE_ROOT:-/Users/${USER}/app/Ingestion/MajorRelease}/statistics.jsp"
+      ARE_DATA_ROOT: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}"
+      ARE_REMOTEPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}/NMOV8.0-ongoing/"
+      ARE_READY_REMOTEPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}"
+      ARE_REMOTE_METAPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}/NMOV8.7-metadata/"
+      ARE_PVEC_URL: "http://swc2pvec:5000/"
+      ARE_DUPLICATE_URL: "http://similarity-search:5000/getDuplicatesfordata/"
+      ARE_DATAPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}/archives/"
+      ARE_METAPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}/metadata/"
+      ARE_SCROLLPATH: "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}/scrollimages/"
+    ports:
+      - "${ARE_PORT:-5000}:5000"
+    volumes:
+      - "${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}:${NMO_DATA_ROOT:-/Users/${USER}/app/Ingestion/data}"
+      - "${NMO_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/export}:${NMO_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/export}"
+      - "${NMO_ARCHIVE_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/dataexport}:${NMO_ARCHIVE_EXPORT_ROOT:-/Users/${USER}/app/Ingestion/dataexport}"
+      - "${NMO_MAJOR_RELEASE_ROOT:-/Users/${USER}/app/Ingestion/MajorRelease}:${NMO_MAJOR_RELEASE_ROOT:-/Users/${USER}/app/Ingestion/MajorRelease}"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mysql:
+        condition: service_healthy
+      swc2pvec:
+        condition: service_started
+      similarity-search:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:12
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-nmo}"
+      POSTGRES_USER: "${POSTGRES_USER:-nmo}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-100neuralDB}"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data-macos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:5.7
+    platform: linux/amd64
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:-root}"
+      MYSQL_USER: "${MYSQL_USER:-nmo}"
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:-nmo}"
+      MYSQL_DATABASE: "${MYSQL_DATABASE:-nmdbDev}"
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql-data-macos:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres-data-macos:
+  mysql-data-macos:

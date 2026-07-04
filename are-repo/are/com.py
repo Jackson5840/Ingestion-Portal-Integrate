@@ -7,6 +7,33 @@ from datetime import datetime
 import json,validators
 import logging
 
+_checkexists_cache = {}
+
+
+def clear_checkexists_cache():
+    _checkexists_cache.clear()
+
+
+def checkexists_cached(table, indexfield, fields):
+    normalized = {}
+    for key, value in fields.items():
+        if value is None:
+            normalized[key] = 'Not reported'
+        elif isinstance(value, (float, int)):
+            normalized[key] = str(value)
+        else:
+            normalized[key] = str(value)
+    cache_key = (
+        cfg.dbsel,
+        table,
+        indexfield,
+        tuple(sorted(normalized.items())),
+    )
+    if cache_key not in _checkexists_cache:
+        _checkexists_cache[cache_key] = checkexists(table, indexfield, dict(normalized))
+    return _checkexists_cache[cache_key]
+
+
 def pgconnect(f):
     #decorator for postgres operations
     def pgconnect_(*args, **kwargs):
@@ -63,6 +90,17 @@ def myconnect(f):
     return myconnect_
 
 
+def myinsert_with_cursor(cur, tablename, data):
+    data = {item: data[item] for item in data if data[item] is not None}
+    fields = ",".join(data.keys())
+    values = "','".join([str(item).replace("'","''") for item in data.values()])
+    statement = """INSERT INTO {}({}) VALUES ('{}') """.format(tablename,fields,values)
+    cur.execute(statement)
+    cur.execute("select LAST_INSERT_ID()")
+    result = cur.fetchone()
+    return result[0]
+
+
 def deletefromjson(akey,aval,jsonfile):
     with open(jsonfile, 'r') as data_file:
         d = json.load(data_file)
@@ -76,6 +114,8 @@ def deletefromjson(akey,aval,jsonfile):
 
 @myconnect
 def updateuploaddate(conn,neuron_list,dt_string,olddate):
+    if not neuron_list:
+        return
     cur = conn.cursor()
     neuron_names = "','".join(neuron_list)
     stmt = """UPDATE deposition 
@@ -83,6 +123,19 @@ def updateuploaddate(conn,neuron_list,dt_string,olddate):
     SET upload_date = '{}'
     WHERE neuron.neuron_name IN ('{}') AND deposition.upload_date = '{}'
     """.format(dt_string,neuron_names,olddate)
+    print(stmt)
+    cur.execute(stmt)
+
+
+@myconnect
+def updateuploaddate_archive(conn,archive,dt_string,olddate):
+    cur = conn.cursor()
+    stmt = """UPDATE deposition 
+    INNER JOIN neuron ON neuron.neuron_id = deposition.neuron_id
+    INNER JOIN archive ON archive.archive_id = neuron.archive_id
+    SET upload_date = '{}'
+    WHERE archive.archive_name = '{}' AND deposition.upload_date = '{}'
+    """.format(dt_string,archive.replace("'","''"),olddate)
     print(stmt)
     cur.execute(stmt)
 
@@ -175,10 +228,13 @@ def deletearchive(conn,foldername,neuronarr):
     #TODO only recently ingested archive should be deleted, many with same name will be deleted from project db
     archive_name = io.namefromfolder(foldername)
     cur = conn.cursor()
+    stmt = "DELETE FROM export WHERE neuron_id IN (SELECT id FROM neuron WHERE archive_id IN (SELECT id FROM archive WHERE name = '{}'))".format(archive_name)
+    cur.execute(stmt)
     stmt = "DELETE FROM archive WHERE name = '{}'".format(archive_name)
     cur.execute(stmt)
-    stmt = "DELETE FROM ingestion WHERE ingestion.neuron_name IN ('{}')".format("','".join(neuronarr))
-    cur.execute(stmt)
+    if neuronarr:
+        stmt = "DELETE FROM ingestion WHERE ingestion.neuron_name IN ('{}')".format("','".join(neuronarr))
+        cur.execute(stmt)
     stmt = "DELETE FROM ingested_archives WHERE foldername = '{}'".format(foldername)
     cur.execute(stmt)
 
@@ -351,10 +407,10 @@ def insertbrainregions(conn,reglist,neuron_id):
         cur.execute(statement)
         res = cur.fetchone()  
         if res is None:
-            brid = myinsert('brainRegion',{'name': name})
+            brid = myinsert_with_cursor(cur,'brainRegion',{'name': name})
         else:
             brid = res[0]
-        myinsert('brainRegion_neuron',{'brainRegionLevel': level, 'brainRegionId': brid,'neuronId': neuron_id})
+        myinsert_with_cursor(cur,'brainRegion_neuron',{'brainRegionLevel': level, 'brainRegionId': brid,'neuronId': neuron_id})
 
 @myconnect
 def insertcelltypes(conn,celllist,neuron_id):
@@ -369,10 +425,10 @@ def insertcelltypes(conn,celllist,neuron_id):
         cur.execute(statement)
         res = cur.fetchone()  
         if res is None:
-            brid = myinsert('cellType',{'name': name})
+            brid = myinsert_with_cursor(cur,'cellType',{'name': name})
         else:
             brid = res[0]
-        myinsert('cellType_neuron',{'cellTypeLevel': level, 'cellTypeId': brid,'neuronId': neuron_id})
+        myinsert_with_cursor(cur,'cellType_neuron',{'cellTypeLevel': level, 'cellTypeId': brid,'neuronId': neuron_id})
 
 def insertdeposition(oldid,adict):
     now = datetime.now()
@@ -882,6 +938,14 @@ def myinsert(conn,tablename,data):
     inserted_id = result[0]
     return inserted_id
 
+
+@myconnect
+def myneuronexists(conn, neuron_name):
+    cur = conn.cursor()
+    stmt = "SELECT neuron_id FROM neuron WHERE neuron_name = '{}' LIMIT 1".format(neuron_name.replace("'","''"))
+    cur.execute(stmt)
+    return cur.fetchone() is not None
+
 @pgconnect
 def updateneuronstatus(conn,neuron_name, status,message = ''):
     cur = conn.cursor()
@@ -963,6 +1027,7 @@ def ingestneuron(d):
             d[item] = escapechars(d[item])
             d[item] = d[item].replace("'","''")
 
+    checkexists('archive', 'archive_name', {'archive_name': d['archive']})
     conn=connect()
     cur = conn.cursor()
     statement = """CALL ingest_data('{}', '{}', '{}',  '{}', '{}','{}' , '{}' , '{}','{}', '{}','{}','{}', '{}','{}', '{}', '{}', '{}', '{}', cast({} as boolean), '{}' , '{}' , '{}', {}, {},{},{}, '{}', '{}','{}', '{}', {},'{}','{}',  null)""".format(d['neuron_name'].replace("'","''"),d['archive'],d['URL_reference'],d['species'], expcondtext,d['age_classification'],d['region'],d['celltype'],d['deposition_date'],d['uploaddate'],
@@ -1511,9 +1576,10 @@ def my_getarchiveneurons(conn,archive):
 
 
 @pgconnect
-def getarchiveneurons(conn,archive):
+def getarchiveneurons(conn,archive,skip_public=False):
     cur = conn.cursor()
-    statement = "SELECT neuron.name,neuron.id from neuron,ingestion where neuron.name = ingestion.neuron_name AND ingestion.archive = '{}'".format(archive)
+    status_clause = "AND COALESCE(ingestion.status,'') <> 'public'" if skip_public else ""
+    statement = "SELECT neuron.name,neuron.id from neuron,ingestion where neuron.name = ingestion.neuron_name AND ingestion.archive = '{}' {}".format(archive,status_clause)
     cur.execute(statement)
     res = cur.fetchall()
     resultnames = [item[0] for item in res]

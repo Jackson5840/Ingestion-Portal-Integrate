@@ -42,9 +42,13 @@ pg_password = os.getenv('ARE_POSTGRES_PASSWORD', '100neuralDB')
 sshuser = 'bljungqu',
 sshkeyfile = '/home/bljungqu/.ssh/id_rsa'
 sshhost = 'cng.gmu.edu'
-sshdir = os.path.join(data_root, 'tomcat', 'neuroMorphoReview') + '/'
+review_webapp_root = os.getenv(
+    'ARE_SSH_REVIEW_DIR',
+    os.path.join(data_root, 'apache-tomcat-9.0.118', 'webapps', 'neuroMorphoReview')
+)
+sshdir = review_webapp_root.rstrip('/') + '/'
 sshmaindir = os.path.join(data_root, 'tomcat', 'neuroMorpho') + '/'
-sshreviewdir = os.path.join(data_root, 'tomcat', 'neuroMorphoReview') + '/'
+sshreviewdir = review_webapp_root.rstrip('/') + '/'
 
 
 # Duplicate detection
@@ -55,7 +59,7 @@ similaritylim = 0.999999
 pcalim = 0.9999
 
 # Web server to check files
-webserver = 'http://cngpro.gmu.edu:8080/neuroMorphoReview/'
+webserver = 'http://localhost:8080//neuroMorphoReview/'
 
 #URL to pvec generation
 #pvecurl = 'https://neuromorpho.org/swc2pvec/'

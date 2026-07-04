@@ -15,6 +15,7 @@ import shutil
 import ipaddress
 import uuid
 from collections import defaultdict
+from threading import Thread
 from are import cfg,io,com,utils,ingest,ingestdiameter
 #from IngestApp import Ingestion
 
@@ -28,6 +29,159 @@ r = redis.Redis(
     db=int(os.getenv('REDIS_DB', '0')),
 )
 logging.basicConfig(level=logging.INFO,filename='app.log', filemode='w', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
+
+
+def _job_key(job_type, archive, suffix):
+    return "{}_{}_{}".format(archive, job_type, suffix)
+
+
+def _decode_redis(value, default=''):
+    if isinstance(value, bytes):
+        return value.decode()
+    if value is None:
+        return default
+    return value
+
+
+def _set_archive_job(job_type, archive, current=None, total=None, message=None, status=None):
+    if current is not None:
+        r.set(_job_key(job_type, archive, 'current'), int(current))
+    if total is not None:
+        r.set(_job_key(job_type, archive, 'total'), int(total))
+    if current is not None or total is not None:
+        stored_current = current
+        stored_total = total
+        if stored_current is None:
+            stored_current = r.get(_job_key(job_type, archive, 'current')) or 0
+        if stored_total is None:
+            stored_total = r.get(_job_key(job_type, archive, 'total')) or 0
+        stored_current = int(stored_current)
+        stored_total = int(stored_total)
+        progress = (stored_current / stored_total * 100) if stored_total else 0
+        r.set(_job_key(job_type, archive, 'progress'), max(0, min(100, progress)))
+    if message is not None:
+        r.set(_job_key(job_type, archive, 'message'), message)
+        r.rpush(_job_key(job_type, archive, 'log'), message)
+        r.ltrim(_job_key(job_type, archive, 'log'), -100, -1)
+    if status is not None:
+        r.set(_job_key(job_type, archive, 'status'), status)
+
+
+def _get_archive_job(job_type, archive):
+    log_lines = r.lrange(_job_key(job_type, archive, 'log'), -100, -1)
+    progress = r.get(_job_key(job_type, archive, 'progress'))
+    current = r.get(_job_key(job_type, archive, 'current'))
+    total = r.get(_job_key(job_type, archive, 'total'))
+    return {
+        'status': _decode_redis(r.get(_job_key(job_type, archive, 'status')), 'idle'),
+        'progress': float(progress) if progress is not None else 0,
+        'current': int(current) if current else 0,
+        'total': int(total) if total else 0,
+        'message': _decode_redis(r.get(_job_key(job_type, archive, 'message')), ''),
+        'log': [_decode_redis(item) for item in log_lines],
+    }
+
+
+def _archive_job_is_running(job_type, archive):
+    return _get_archive_job(job_type, archive)['status'] in ('running', 'stopping')
+
+
+def _prepare_archive_job(job_type, archive, message):
+    r.delete(_job_key(job_type, archive, 'stop'))
+    r.delete(_job_key(job_type, archive, 'log'))
+    _set_archive_job(job_type, archive, current=0, total=0, message=message, status='running')
+
+
+def _archive_job_should_stop(job_type, archive):
+    return bool(r.get(_job_key(job_type, archive, 'stop')))
+
+
+def _workflow_lock_value(job_type, archive):
+    return '{}:{}'.format(job_type, archive)
+
+
+def _claim_archive_workflow_lock(job_type, archive):
+    desired = _workflow_lock_value(job_type, archive)
+    owner = _decode_redis(r.get('archive_workflow_lock'), '')
+    if owner:
+        parts = owner.split(':', 1)
+        if len(parts) == 2 and _archive_job_is_running(parts[0], parts[1]):
+            return False, owner
+    r.set('archive_workflow_lock', desired, ex=7 * 24 * 60 * 60)
+    return True, desired
+
+
+def _release_archive_workflow_lock(job_type, archive):
+    desired = _workflow_lock_value(job_type, archive)
+    owner = _decode_redis(r.get('archive_workflow_lock'), '')
+    if owner == desired:
+        r.delete('archive_workflow_lock')
+
+
+def _run_ingest_archive_job(folder_name):
+    job_type = 'ingest'
+    def progress_cb(current, total, message, status='running'):
+        _set_archive_job(job_type, folder_name, current=current, total=total, message=message, status=status)
+
+    try:
+        cfg.sshdir = cfg.sshreviewdir
+        progress_cb(0, 0, 'Starting ingest for {}'.format(folder_name))
+        neuron_results = ingest.ingestarchive(
+            folder_name,
+            progress_cb=progress_cb,
+            should_stop=lambda: _archive_job_should_stop(job_type, folder_name),
+        )
+        errors = [item for item in neuron_results if neuron_results[item].get('status') == 'error']
+        current_state = _get_archive_job(job_type, folder_name)
+        if _archive_job_should_stop(job_type, folder_name) or current_state['status'] == 'stopped':
+            _set_archive_job(job_type, folder_name, message='Ingest stopped for {}'.format(folder_name), status='stopped')
+        elif errors:
+            _set_archive_job(job_type, folder_name, message='Ingest finished with {} error(s)'.format(len(errors)), status='error')
+        else:
+            _set_archive_job(job_type, folder_name, current=current_state['total'], total=current_state['total'], message='Ingest complete for {}'.format(folder_name), status='success')
+    except Exception:
+        logging.exception("Error during background ingest of archive {}".format(folder_name))
+        _set_archive_job(job_type, folder_name, message='Ingest failed for {}'.format(folder_name), status='error')
+    finally:
+        _release_archive_workflow_lock(job_type, folder_name)
+
+
+def _run_export_to_main_job(archive):
+    job_type = 'exportmain'
+    def progress_cb(current, total, message, status='running'):
+        _set_archive_job(job_type, archive, current=current, total=total, message=message, status=status)
+
+    try:
+        now = datetime.datetime.now()
+        dt_string = now.strftime("%Y-%m-%d")
+        cfg.sshdir = cfg.sshreviewdir
+        cfg.dbsel = cfg.dbselmain
+        progress_cb(0, 100, 'Starting Export to main for {}'.format(archive))
+        release_result = io.mainrelease(
+            archive,
+            dt_string,
+            progress_cb=progress_cb,
+            should_stop=lambda: _archive_job_should_stop(job_type, archive),
+        )
+        if release_result.get('status') == 'stopped' or _archive_job_should_stop(job_type, archive):
+            _set_archive_job(job_type, archive, message='Export to main stopped for {}'.format(archive), status='stopped')
+            return
+        cfg.sshdir = cfg.sshmaindir
+        progress_cb(96, 100, 'Generating WIN.jsp and release info')
+        (version,nneurons) = io.genwinjsp(archive, dt_string)
+        io.writeendings(archive)
+        io.updateinfo(archive,version,dt_string)
+        # Temporarily disable the main publish workflow trigger.
+        # io.mainworkflow()
+        io.updatetickertape()
+        progress_cb(100, 100, 'Export to main complete for {}'.format(archive), 'success')
+    except Exception:
+        logging.exception("Error during background export to main site of archive {}".format(archive))
+        _set_archive_job(job_type, archive, message='Export to main failed for {}'.format(archive), status='error')
+    finally:
+        cfg.sshdir = cfg.sshreviewdir
+        cfg.dbsel = cfg.dbselrev
+        _release_archive_workflow_lock(job_type, archive)
 
 
 @app.route('/', methods=['GET'])
@@ -492,6 +646,7 @@ LOG_TIME_FORMAT = '%d/%b/%Y:%H:%M:%S %z'
 ACCESS_LOG_RE = re.compile(
     r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<time>[^\]]+)\]\s+"[^"]*"\s+(?P<status>\d{3})\s+'
 )
+HIT_LOG_QUARTER_RE = re.compile(r'^(?P<year>\d{4})\s*Q(?P<quarter>[1-4])$')
 
 
 def is_localhost_ip(ip_text):
@@ -637,6 +792,194 @@ def analyze_hit_log_files(files):
     }
 
 
+def major_release_statistics_jsp_path():
+    return os.getenv(
+        'ARE_MAJOR_RELEASE_STATISTICS_JSP',
+        '/home/kira/app/Ingestion/MajorRelease/statistics.jsp',
+    )
+
+
+def parse_hit_quarter_label(label):
+    match = HIT_LOG_QUARTER_RE.match(str(label or '').strip())
+    if match is None:
+        raise ValueError('Invalid quarter label: {}'.format(label))
+    return int(match.group('year')), int(match.group('quarter'))
+
+
+def build_hit_quarter_values(per_quarter_rows, existing_values):
+    values = [int(value or 0) for value in existing_values]
+    skipped_before_start = 0
+    hit_delta_total = 0
+    updated_indices = set()
+
+    for row in per_quarter_rows:
+        year, quarter = parse_hit_quarter_label(row.get('Quarter'))
+        index = major_release_quarter_index(year, quarter)
+        if index < 0:
+            skipped_before_start += 1
+            continue
+        hits = int(row.get('Hits') or 0)
+        if index >= len(values):
+            values.extend([0] * (index + 1 - len(values)))
+        values[index] = int(values[index] or 0) + hits
+        hit_delta_total += hits
+        updated_indices.add(index)
+
+    return values, skipped_before_start, hit_delta_total, len(updated_indices)
+
+
+def strip_html(value):
+    return re.sub(r'<[^>]+>', '', str(value or '')).strip()
+
+
+def parse_dataset_int(value):
+    text = strip_html(value).replace(',', '')
+    return int(float(text)) if text else 0
+
+
+def build_country_dataset(existing_dataset, access_country_rows):
+    country_index = {}
+    country_order = []
+
+    for row in existing_dataset:
+        if not row:
+            continue
+        country = strip_html(row[0])
+        if not country or country.lower() == 'total':
+            continue
+        country_index[country] = {
+            'unique_ips': parse_dataset_int(row[1]) if len(row) > 1 else 0,
+            'hits': parse_dataset_int(row[2]) if len(row) > 2 else 0,
+        }
+        country_order.append(country)
+
+    added_countries = 0
+    country_delta_hits = 0
+    country_delta_unique_ips = 0
+    for row in access_country_rows:
+        country = str(row.get('Country') or '').strip()
+        if not country or country.lower() == 'total':
+            continue
+        unique_ips = int(row.get('Unique IP Addresses') or 0)
+        hits = int(row.get('No. of Hits') or 0)
+        if country not in country_index:
+            country_index[country] = {
+                'unique_ips': 0,
+                'hits': 0,
+            }
+            country_order.append(country)
+            added_countries += 1
+        country_index[country]['unique_ips'] += unique_ips
+        country_index[country]['hits'] += hits
+        country_delta_unique_ips += unique_ips
+        country_delta_hits += hits
+
+    dataset = []
+    total_unique_ips = 0
+    total_hits = 0
+    for country in country_order:
+        unique_ips = country_index[country]['unique_ips']
+        hits = country_index[country]['hits']
+        average = round_half_up(hits / unique_ips) if unique_ips else 0
+        total_unique_ips += unique_ips
+        total_hits += hits
+        dataset.append([country, unique_ips, hits, average])
+
+    total_average = round_half_up(total_hits / total_unique_ips) if total_unique_ips else 0
+    dataset.append([
+        '<b>Total</b>',
+        '<b>{}</b>'.format(total_unique_ips),
+        '<b>{}</b>'.format(total_hits),
+        '<b>{}</b>'.format(total_average),
+    ])
+
+    return {
+        'dataset': dataset,
+        'added_countries': added_countries,
+        'delta_unique_ips': country_delta_unique_ips,
+        'delta_hits': country_delta_hits,
+        'total_unique_ips': total_unique_ips,
+        'total_hits': total_hits,
+    }
+
+
+def parse_country_dataset(raw_value):
+    try:
+        return ast.literal_eval(raw_value)
+    except Exception as exc:
+        raise ValueError('Could not parse countryDataSet: {}'.format(exc))
+
+
+def update_hit_log_statistics(per_quarter_rows, access_country_rows, create_backup=True):
+    jsp_path = major_release_statistics_jsp_path()
+    with open(jsp_path, 'r', encoding='ISO-8859-1') as handle:
+        content = handle.read()
+
+    hits_pattern = re.compile(
+        r"(name:\s*'Hits'\s*,[\s\S]*?data\s*:\s*)\[(.*?)\]",
+        re.S,
+    )
+    hits_match = hits_pattern.search(content)
+    if hits_match is None:
+        raise ValueError("Could not find series 'Hits' in {}".format(jsp_path))
+
+    country_pattern = re.compile(r'var\s+countryDataSet\s*=\s*(\[.*?\]);', re.S)
+    country_match = country_pattern.search(content)
+    if country_match is None:
+        raise ValueError('Could not find countryDataSet in {}'.format(jsp_path))
+
+    existing_hits = parse_javascript_number_array(hits_match.group(2))
+    hit_values, skipped_before_start, hit_delta_total, hit_quarters_updated = build_hit_quarter_values(
+        per_quarter_rows,
+        existing_hits,
+    )
+    country_result = build_country_dataset(
+        parse_country_dataset(country_match.group(1)),
+        access_country_rows,
+    )
+    country_dataset = country_result['dataset']
+
+    replacements = [
+        (
+            hits_match.start(),
+            hits_match.end(),
+            hits_match.group(1) + json.dumps(hit_values),
+        ),
+        (
+            country_match.start(),
+            country_match.end(),
+            'var countryDataSet = {};'.format(json.dumps(country_dataset)),
+        ),
+    ]
+
+    updated_content = content
+    for start, end, replacement in sorted(replacements, reverse=True):
+        updated_content = updated_content[:start] + replacement + updated_content[end:]
+
+    backup_path = jsp_path + '.bak'
+    if create_backup:
+        with open(backup_path, 'w', encoding='ISO-8859-1') as handle:
+            handle.write(content)
+    with open(jsp_path, 'w', encoding='ISO-8859-1') as handle:
+        handle.write(updated_content)
+
+    return {
+        'path': jsp_path,
+        'backup_path': backup_path,
+        'hit_quarters_updated': hit_quarters_updated,
+        'hit_series_length': len(hit_values),
+        'hit_total': sum(hit_values),
+        'hit_delta_total': hit_delta_total,
+        'country_rows_updated': len(country_dataset),
+        'country_delta_hits': country_result['delta_hits'],
+        'country_delta_unique_ips': country_result['delta_unique_ips'],
+        'country_total_hits': country_result['total_hits'],
+        'country_total_unique_ips': country_result['total_unique_ips'],
+        'country_added': country_result['added_countries'],
+        'skipped_quarter_rows_before_start': skipped_before_start,
+    }
+
+
 @app.route('/major_release/analyze_hit_logs', methods=['POST'])
 def analyze_hit_logs():
     uploaded_files = request.files.getlist('files')
@@ -675,6 +1018,10 @@ def analyze_hit_logs():
 
         pd.DataFrame(result['per_quarter_rows']).to_excel(per_quarter_path, index=False)
         pd.DataFrame(result['access_country_rows']).to_excel(access_country_path, index=False)
+        statistics_result = update_hit_log_statistics(
+            result['per_quarter_rows'],
+            result['access_country_rows'],
+        )
 
         return jsonify({
             'status': 'success',
@@ -693,6 +1040,7 @@ def analyze_hit_logs():
                 'path': access_country_path,
                 'url': '../major_release/hit_log_result/AccessCountry.xlsx',
             },
+            'statistics_jsp': statistics_result,
             'country_note': 'Country lookup uses ip-api.com batch lookup. Failed/private/local IPs are grouped as Unknown IP.',
         })
     except Exception as exc:
@@ -819,8 +1167,6 @@ def revertarchive(archive):
 def deleteneurons():
     anarchive = request.get_json()
     neuronfolder = anarchive['name']
-    for item in anarchive['neurons']:
-        io.deleteneuron(item['neuron_name'])
     return io.revertarchive(neuronfolder)
 
 @app.route('/archiveneurons', methods=['POST'])
@@ -870,19 +1216,28 @@ def ingestneuron(neuron_name):
 
 @app.route('/ingestarchive/<string:folder_name>',  methods=['GET'])
 def ingestarchive(folder_name):
-    cfg.sshdir = cfg.sshreviewdir
-    neuronResults = ingest.ingestarchive(folder_name)
-    logging.info("check 1 {}".format(neuronResults))
-    if any([neuronResults[item]['status'] == 'error' for item in neuronResults]):
-        return {
-            'data': ', '.join(['{}: {}'.format(item,neuronResults[item]['message']) for item in neuronResults if neuronResults[item]['status'] == 'error']),
-            'status': 'error'
-        }
-    else: 
-        return {
-            'data': 'Archive {} ingested'.format(folder_name),
-            'status': 'success'
-        }
+    if _archive_job_is_running('ingest', folder_name):
+        return {'status': 'running', 'job_id': folder_name}
+    locked, owner = _claim_archive_workflow_lock('ingest', folder_name)
+    if not locked:
+        return {'status': 'error', 'message': 'Another archive workflow is running: {}'.format(owner)}
+    _prepare_archive_job('ingest', folder_name, 'Starting ingest for {}'.format(folder_name))
+    t = Thread(target=_run_ingest_archive_job, args=(folder_name,))
+    t.daemon = True
+    t.start()
+    return {'status': 'started', 'job_id': folder_name}
+
+
+@app.route('/checkingestarchive/<string:folder_name>', methods=['GET'])
+def checkingestarchive(folder_name):
+    return _get_archive_job('ingest', folder_name)
+
+
+@app.route('/stopingestarchive/<string:folder_name>', methods=['POST'])
+def stopingestarchive(folder_name):
+    r.set(_job_key('ingest', folder_name, 'stop'), '1')
+    _set_archive_job('ingest', folder_name, message='Stop requested. Finishing current neuron before stopping.', status='stopping')
+    return _get_archive_job('ingest', folder_name)
 
 @app.route('/deleteneuron/<string:neuron_name>',  methods=['GET'])
 def deleteneuron(neuron_name):
@@ -937,34 +1292,28 @@ def tweetneurons(neuron_name,archive):
 
 @app.route('/exporttomain/<string:archive>',  methods=['GET'])
 def exporttomain(archive):
-    try:    
-        now = datetime.datetime.now()
-        dt_string = now.strftime("%Y-%m-%d")
-        logging.info("Dtstring: {}".format(dt_string))
-        cfg.sshdir = cfg.sshreviewdir
-        cfg.dbsel = cfg.dbselmain
-        io.mainrelease(archive,dt_string)
-        cfg.sshdir = cfg.sshmaindir
-        
-        (version,nneurons) = io.genwinjsp(archive, dt_string)
-        io.writeendings(archive)
-        io.updateinfo(archive,version,dt_string)
-        # Temporarily disable the main publish workflow trigger.
-        # io.mainworkflow()
-        io.updatetickertape()
-        results = {
-            "data" : "Archive {} exported".format(archive),
-            "status": "success"
-        }
-        #io.publishtweet(version,nneurons,archive)
-    except Exception:
-        logging.exception("Error during export to main site of archive {}".format(archive))
-        results = {
-            "status": "error"
-        }    
-    cfg.sshdir = cfg.sshreviewdir
-    cfg.dbsel = cfg.dbselrev
-    return results
+    if _archive_job_is_running('exportmain', archive):
+        return {'status': 'running', 'job_id': archive}
+    locked, owner = _claim_archive_workflow_lock('exportmain', archive)
+    if not locked:
+        return {'status': 'error', 'message': 'Another archive workflow is running: {}'.format(owner)}
+    _prepare_archive_job('exportmain', archive, 'Starting Export to main for {}'.format(archive))
+    t = Thread(target=_run_export_to_main_job, args=(archive,))
+    t.daemon = True
+    t.start()
+    return {'status': 'started', 'job_id': archive}
+
+
+@app.route('/checkexporttomain/<string:archive>', methods=['GET'])
+def checkexporttomain(archive):
+    return _get_archive_job('exportmain', archive)
+
+
+@app.route('/stopexporttomain/<string:archive>', methods=['POST'])
+def stopexporttomain(archive):
+    r.set(_job_key('exportmain', archive, 'stop'), '1')
+    _set_archive_job('exportmain', archive, message='Stop requested. Finishing current neuron before stopping.', status='stopping')
+    return _get_archive_job('exportmain', archive)
 
 
 @app.route('/create_tweet', methods=['POST'])
