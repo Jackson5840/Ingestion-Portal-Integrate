@@ -162,7 +162,33 @@ def _run_ingest_archive_job(folder_name, threads=1):
         _release_archive_workflow_lock(job_type, folder_name)
 
 
-def _run_export_to_main_job(archive):
+def _run_read_archive_job(archive, steps=None):
+    job_type = 'read'
+    def progress_cb(current, total, message, status='running'):
+        _set_archive_job(job_type, archive, current=current, total=total, message=message, status=status)
+
+    try:
+        progress_cb(0, 100, 'Starting Read Archive for {}'.format(archive))
+        result = io.getfiles(
+            archive,
+            steps or {},
+            progress_cb=progress_cb,
+            should_stop=lambda: _archive_job_should_stop(job_type, archive),
+        )
+        if result.get('status') == 'stopped' or _archive_job_should_stop(job_type, archive):
+            _set_archive_job(job_type, archive, message='Read Archive stopped for {}'.format(archive), status='stopped')
+        elif result.get('status') == 'error':
+            _set_archive_job(job_type, archive, message=result.get('message', 'Read Archive failed for {}'.format(archive)), status='error')
+        else:
+            _set_archive_job(job_type, archive, current=100, total=100, message=result.get('message', 'Read Archive complete for {}'.format(archive)), status='success')
+    except Exception:
+        logging.exception("Error during background read of archive {}".format(archive))
+        _set_archive_job(job_type, archive, message='Read Archive failed for {}'.format(archive), status='error')
+    finally:
+        _release_archive_workflow_lock(job_type, archive)
+
+
+def _run_export_to_main_job(archive, threads=1):
     job_type = 'exportmain'
     def progress_cb(current, total, message, status='running'):
         _set_archive_job(job_type, archive, current=current, total=total, message=message, status=status)
@@ -172,12 +198,13 @@ def _run_export_to_main_job(archive):
         dt_string = now.strftime("%Y-%m-%d")
         cfg.sshdir = cfg.sshreviewdir
         cfg.dbsel = cfg.dbselmain
-        progress_cb(0, 100, 'Starting Export to main for {}'.format(archive))
+        progress_cb(0, 100, 'Starting Export to main for {} with {} thread(s)'.format(archive, threads))
         release_result = io.mainrelease(
             archive,
             dt_string,
             progress_cb=progress_cb,
             should_stop=lambda: _archive_job_should_stop(job_type, archive),
+            threads=threads,
         )
         if release_result.get('status') == 'stopped' or _archive_job_should_stop(job_type, archive):
             _set_archive_job(job_type, archive, message='Export to main stopped for {}'.format(archive), status='stopped')
@@ -1157,13 +1184,24 @@ def readarchive(archive):
 
 @app.route('/readarchive_steps/<string:archive>', methods=['POST'])
 def readarchive_steps(archive):
+    if _archive_job_is_running('read', archive):
+        return {'status': 'running', 'job_id': archive}
     data = request.get_json() or {}
-    result = io.getfiles(archive, data.get('steps', {}))
-    return result
+    locked, owner = _claim_archive_workflow_lock('read', archive)
+    if not locked:
+        return {'status': 'error', 'message': 'Another archive workflow is running: {}'.format(owner)}
+    _prepare_archive_job('read', archive, 'Starting Read Archive for {}'.format(archive))
+    t = Thread(target=_run_read_archive_job, args=(archive, data.get('steps', {})))
+    t.daemon = True
+    t.start()
+    return {'status': 'started', 'job_id': archive}
 
 #reading status
 @app.route('/checkreadarchive/<string:archive>', methods=['GET'])
 def checkreadarchive(archive):
+    job_state = _get_archive_job('read', archive)
+    if job_state['status'] != 'idle':
+        return job_state
     status = r.get(f"{archive}_read_status")
     progress = r.get(f"{archive}_read_progress")
     message = r.get(f"{archive}_read_message")
@@ -1173,6 +1211,13 @@ def checkreadarchive(archive):
         'progress': float(progress) if progress is not None else 0,
         'message': message.decode() if isinstance(message, bytes) else (message or '')
     }
+
+
+@app.route('/stopreadarchive/<string:archive>', methods=['POST'])
+def stopreadarchive(archive):
+    r.set(_job_key('read', archive, 'stop'), '1')
+    _set_archive_job('read', archive, message='Stop requested. Finishing current read stage before stopping.', status='stopping')
+    return _get_archive_job('read', archive)
 
 
 @app.route('/revertarchive/<string:archive>', methods=['GET'])
@@ -1313,14 +1358,16 @@ def tweetneurons(neuron_name,archive):
 def exporttomain(archive):
     if _archive_job_is_running('exportmain', archive):
         return {'status': 'running', 'job_id': archive}
+    threads = _parse_ingest_threads(request.args.get('threads'))
     locked, owner = _claim_archive_workflow_lock('exportmain', archive)
     if not locked:
         return {'status': 'error', 'message': 'Another archive workflow is running: {}'.format(owner)}
-    _prepare_archive_job('exportmain', archive, 'Starting Export to main for {}'.format(archive))
-    t = Thread(target=_run_export_to_main_job, args=(archive,))
+    _prepare_archive_job('exportmain', archive, 'Starting Export to main for {} with {} thread(s)'.format(archive, threads))
+    r.set(_job_key('exportmain', archive, 'threads'), threads)
+    t = Thread(target=_run_export_to_main_job, args=(archive, threads))
     t.daemon = True
     t.start()
-    return {'status': 'started', 'job_id': archive}
+    return {'status': 'started', 'job_id': archive, 'threads': threads}
 
 
 @app.route('/checkexporttomain/<string:archive>', methods=['GET'])

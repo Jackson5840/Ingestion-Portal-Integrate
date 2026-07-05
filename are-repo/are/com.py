@@ -1478,6 +1478,81 @@ def get_existing_mysql_neuron_names(conn, neuron_names):
     return result
 
 
+def get_existing_mysql_neuron_names_in_db(neuron_names, database):
+    result = set()
+    names = list(dict.fromkeys(neuron_names))
+    if not names:
+        return result
+    conn = mysc.connect(
+        user=cfg.dbuser,
+        password=cfg.dbpass,
+        host=cfg.dbhost,
+        database=database,
+        auth_plugin=cfg.db_auth_plugin,
+    )
+    conn.autocommit = True
+    try:
+        cur = conn.cursor()
+        chunk_size = 1000
+        for offset in range(0, len(names), chunk_size):
+            chunk = names[offset:offset + chunk_size]
+            placeholders = ",".join(["%s"] * len(chunk))
+            cur.execute(
+                "SELECT neuron_name FROM neuron WHERE neuron_name IN ({})".format(placeholders),
+                tuple(chunk),
+            )
+            result.update(item[0] for item in cur.fetchall())
+        return result
+    finally:
+        conn.close()
+
+
+@pgconnect
+def get_existing_ingestion_names(conn, neuron_names):
+    result = set()
+    names = list(dict.fromkeys(neuron_names))
+    if not names:
+        return result
+    cur = conn.cursor()
+    chunk_size = 1000
+    for offset in range(0, len(names), chunk_size):
+        chunk = names[offset:offset + chunk_size]
+        placeholders = ",".join(["%s"] * len(chunk))
+        cur.execute(
+            "SELECT neuron_name FROM ingestion WHERE neuron_name IN ({})".format(placeholders),
+            tuple(chunk),
+        )
+        result.update(item[0] for item in cur.fetchall())
+    return result
+
+
+@pgconnect
+def insert_ingestion_rows(conn, rows):
+    if not rows:
+        return 0
+    values = [
+        (
+            row['neuron_name'],
+            row['status'],
+            row['archive'],
+            row['ingestion_date'],
+            row['message'],
+        )
+        for row in rows
+    ]
+    cur = conn.cursor()
+    psycopg2.extras.execute_values(
+        cur,
+        """
+        INSERT INTO ingestion(neuron_name, status, archive, ingestion_date, message)
+        VALUES %s
+        """,
+        values,
+        page_size=1000,
+    )
+    return len(values)
+
+
 @pgconnect
 def updateneuronstatus(conn,neuron_name, status,message = ''):
     cur = conn.cursor()
@@ -2216,7 +2291,7 @@ def my_getarchiveneurons(conn,archive):
 @pgconnect
 def getarchiveneurons(conn,archive,skip_public=False):
     cur = conn.cursor()
-    status_clause = "AND COALESCE(ingestion.status,'') <> 'public'" if skip_public else ""
+    status_clause = "AND (ingestion.status IS NULL OR ingestion.status <> 'public')" if skip_public else ""
     statement = "SELECT neuron.name,neuron.id from neuron,ingestion where neuron.name = ingestion.neuron_name AND ingestion.archive = '{}' {}".format(archive,status_clause)
     cur.execute(statement)
     res = cur.fetchall()

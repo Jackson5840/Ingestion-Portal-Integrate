@@ -14,6 +14,7 @@ import mysql.connector
 import logging
 import paramiko
 import redis
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 # paramiko.util.log_to_file('paramiko.log', level='DEBUG')
 
 # use localhost flag to run on localhost
@@ -28,6 +29,19 @@ _transfer_dir_cache_lock = RLock()
 def clear_transfer_dir_cache():
     with _transfer_dir_cache_lock:
         _transfer_dir_cache.clear()
+
+
+def _read_pvec_threads():
+    try:
+        return max(1, min(32, int(os.getenv('ARE_READ_PVEC_THREADS', '8'))))
+    except ValueError:
+        return 8
+
+
+def _copytree_replace(src, dest, ignore=None):
+    if os.path.exists(dest):
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, ignore=ignore)
 
 
 #update main local only
@@ -292,8 +306,8 @@ def getsourcefiles(sourcepath,localsource,metafolder,swcfolder,stdpath,stdfolder
     srcdup = utils.checkswctosource(sourcepath,swcfolder)
     utils.createmetachildren(srcdup,metafolder)
 
-    shutil.copytree(sourcepath,localsource)
-    shutil.copytree(stdpath,stdfolder)
+    _copytree_replace(sourcepath, localsource)
+    _copytree_replace(stdpath, stdfolder)
     stddup = {item.split('.')[0] + '.std': 
         [elem.split('.')[0] + '.std' for elem in srcdup[item]] for item in srcdup.keys()}
     for item in srcdup:
@@ -325,7 +339,7 @@ def populateresult(result,archive):
         newres.append(item)
     return newres
         
-def getfiles(foldername, steps=None):
+def getfiles(foldername, steps=None, progress_cb=None, should_stop=None):
     """ Takes one archive (folder aanme) as input, fetches files and distributes.
     For the archive from mounted smb dir as defined in are.cfg
     First get the name of the archive as in csv file
@@ -349,9 +363,30 @@ def getfiles(foldername, steps=None):
         db=int(os.getenv('REDIS_DB', '0')),
     )
     def set_read_progress(progress, message, status='running'):
-        rr.set(f"{archive}_read_progress", progress)
-        rr.set(f"{archive}_read_message", message)
-        rr.set(f"{archive}_read_status", status)
+        progress = max(0, min(100, int(progress)))
+        if progress_cb:
+            progress_cb(progress, 100, message, status)
+        else:
+            for key_name in {archive, foldername}:
+                rr.set(f"{key_name}_read_progress", progress)
+                rr.set(f"{key_name}_read_message", message)
+                rr.set(f"{key_name}_read_status", status)
+
+    stage_start = time.time()
+
+    def finish_stage(progress, message, status='running'):
+        nonlocal stage_start
+        elapsed = time.time() - stage_start
+        set_read_progress(progress, '{} ({:.2f}s)'.format(message, elapsed), status)
+        stage_start = time.time()
+
+    def stop_requested(progress, message):
+        if should_stop and should_stop():
+            result['status'] = 'stopped'
+            result['message'] = message
+            set_read_progress(progress, message, 'stopped')
+            return True
+        return False
 
     set_read_progress(5, 'Starting archive read')
     try:
@@ -360,6 +395,7 @@ def getfiles(foldername, steps=None):
 
         if ares and ares["status"] in ['read','partial','ingested'] and all([copy_files, source_files, precheck_files, pvec_files, duplicate_check, set_ready]):
             result = ares
+            set_read_progress(100, 'Archive was already read: {}'.format(ares.get('status', 'ready')), 'success')
         else:
         
             srcpath = os.path.join(cfg.remotepath, foldername + '_Final')
@@ -383,10 +419,12 @@ def getfiles(foldername, steps=None):
 
                 shutil.copytree(srcpath,dstpath,ignore=ignorepattern)
                 # reading status
-                set_read_progress(35, 'Copied archive files')
+                finish_stage(35, 'Copied archive files')
 
                 if not os.path.isdir(lswcdir):
-                    os.rename(cfg.datapath,foldername,'CNG version/',lswcdir)
+                    lower_swcdir = os.path.join(cfg.datapath, foldername, 'CNG version')
+                    if os.path.isdir(lower_swcdir):
+                        os.rename(lower_swcdir, lswcdir)
                 shutil.copytree(srcmetapath,dstmetapath)
             else:
                 if not os.path.isdir(dstpath):
@@ -395,18 +433,24 @@ def getfiles(foldername, steps=None):
                     raise FileNotFoundError('Metadata folder does not exist: {}'.format(dstmetapath))
 
             # reading status
-            set_read_progress(50, 'Copied metadata files' if copy_files else 'Using existing archive files')
+            finish_stage(50, 'Copied metadata files' if copy_files else 'Using existing archive files')
+            if stop_requested(50, 'Read stopped after copy stage'):
+                return result
             if source_files:
                 getsourcefiles(os.path.join(cfg.remotepath,foldername + '_Final','Source-Version/'),os.path.join(cfg.datapath,foldername,'Source-Version/'),dstmetapath,lswcdir,rstddir,lstddir)
 
             # reading status
-            set_read_progress(65, 'Copied source files' if source_files else 'Skipped source files')
+            finish_stage(65, 'Copied source files' if source_files else 'Skipped source files')
+            if stop_requested(65, 'Read stopped after source file stage'):
+                return result
 
             if precheck_files:
                 prechecks(dstpath,dstmetapath,foldername)
 
             # reading status
-            set_read_progress(75, 'Finished prechecks' if precheck_files else 'Skipped prechecks')
+            finish_stage(75, 'Finished prechecks' if precheck_files else 'Skipped prechecks')
+            if stop_requested(75, 'Read stopped after precheck stage'):
+                return result
 
             #lgifdir = os.path.join(cfg.datapath, archive,'rotatingImages/')
             #os.mkdir(lgifdir)
@@ -415,15 +459,23 @@ def getfiles(foldername, steps=None):
 
             duplicateresult = []
             if pvec_files:
-                data = readpvecmes(foldername)
+                def pvec_progress(current, total, message, status='running'):
+                    scaled = 75 + int((current / total) * 10) if total else 85
+                    set_read_progress(scaled, message, status)
+
+                data = readpvecmes(foldername, progress_cb=pvec_progress)
 
                 # reading status
-                set_read_progress(85, 'Prepared morphology data')
+                finish_stage(85, 'Prepared morphology data')
+                if stop_requested(85, 'Read stopped after PVec stage'):
+                    return result
 
                 if duplicate_check:
+                    set_read_progress(88, 'Checking duplicates')
                     duplicateresult = checkduplicatesinternal(data,cfg.pcalim,cfg.similaritylim)
+                    finish_stage(92, 'Finished duplicate check')
             else:
-                set_read_progress(85, 'Skipped pvec and duplicate check')
+                finish_stage(85, 'Skipped pvec and duplicate check')
 
 
             #duplicateresult = 0
@@ -459,7 +511,7 @@ def getfiles(foldername, steps=None):
             if set_ready:
                 setready(dstpath,archive,duplicateresult,foldername)
             # reading status
-            set_read_progress(100, 'Archive read complete', 'success')
+            finish_stage(100, 'Archive read complete', 'success')
 
     except Exception as identifier:
         identifier = com.cleanerr(str(identifier))
@@ -872,20 +924,21 @@ def prechecks(datapath,metapath,foldername=''):
         raise FileNotFoundError('Files exist in CNG Version  folder that are not in img folder: {}'.format(str(notinimg)))
 
     namedict = {}
-    splitpath = datapath.split("/")
-    archive = splitpath[len(splitpath)-1]
+    archive = os.path.basename(datapath.rstrip('/'))
+    main_existing_neurons = com.get_existing_mysql_neuron_names_in_db(releasefilenames, cfg.dbselmain)
+    metapath_by_filename = {item[0]: item[1] for item in metafiles}
     for item in releasefilenames:
         #if com.checkindb("neuron","neuron_name",{"neuron_name": item}):
-        if com.checkindb_in_db("neuron", "neuron_name", {"neuron_name": item}, cfg.dbselmain):
+        if item in main_existing_neurons:
             logging.info("in this check ")
             new_name = "{}_{}".format(archive,item)
             namedict[item] = new_name
             sourcefile = glob.glob("{}/{}.*".format(sourcepath, item))[0]
             srcext = os.path.splitext(sourcefile)[1] 
-            thismetapos = metafilenames.index("{}.CNG.swc".format(item))
+            thismetapath = metapath_by_filename["{}.CNG.swc".format(item)]
 
 
-            os.rename(os.path.join(metapaths[thismetapos],"{}.CNG.swc".format(item)),os.path.join(metapaths[thismetapos],"{}.CNG.swc".format(new_name)))
+            os.rename(os.path.join(thismetapath,"{}.CNG.swc".format(item)),os.path.join(thismetapath,"{}.CNG.swc".format(new_name)))
             os.rename(os.path.join(releasedir,"{}.CNG.swc".format(item)),os.path.join(releasedir,"{}.CNG.swc".format(new_name)))
             os.rename(os.path.join(sourcepath,"{}{}".format(item,srcext)),os.path.join(sourcepath,"{}{}".format(new_name,srcext)))
             os.rename(os.path.join(imgpath,"PNG","{}.png".format(item)),os.path.join(imgpath,"PNG","{}.png".format(new_name)))
@@ -894,15 +947,16 @@ def prechecks(datapath,metapath,foldername=''):
             os.rename(os.path.join(stdpath,"{}.std".format(item)),os.path.join(stdpath,"{}.std".format(new_name)))
             os.rename(os.path.join(rempath,"{}.CNG.swc.std".format(item)),os.path.join(rempath,"{}.CNG.swc.std".format(new_name)))
 
-            renamecsvneuron(namedict,foldername,datapath,'All')
-            renamecsvneuron(namedict,foldername,datapath,'AP')
-            renamecsvneuron(namedict,foldername,datapath,'APA')
-            renamecsvneuron(namedict,foldername,datapath,'APB')
-            renamecsvneuron(namedict,foldername,datapath,'AX')
-            renamecsvneuron(namedict,foldername,datapath,'BS')
-            renamecsvneuron(namedict,foldername,datapath,'BSA')
-            renamecsvneuron(namedict,foldername,datapath,'NEU')
-            renamecsvneuron(namedict,foldername,datapath,'PR')
+    if namedict:
+        renamecsvneuron(namedict,foldername,datapath,'All')
+        renamecsvneuron(namedict,foldername,datapath,'AP')
+        renamecsvneuron(namedict,foldername,datapath,'APA')
+        renamecsvneuron(namedict,foldername,datapath,'APB')
+        renamecsvneuron(namedict,foldername,datapath,'AX')
+        renamecsvneuron(namedict,foldername,datapath,'BS')
+        renamecsvneuron(namedict,foldername,datapath,'BSA')
+        renamecsvneuron(namedict,foldername,datapath,'NEU')
+        renamecsvneuron(namedict,foldername,datapath,'PR')
 
 def renamecsvneuron(namedict,foldername,path,type):
     #read csv, and split on "," the line
@@ -940,7 +994,9 @@ def setready(folderpath,archive,duplicateresult,foldername):
 
     neuronfolder = folderpath + '/CNG Version'
     archive = namefromfolder(foldername)
-    neuronfiles = os    .listdir(neuronfolder)
+    neuronfiles = sorted([item for item in os.listdir(neuronfolder) if item.endswith('.swc')])
+    neuron_names = [item[0:-8] for item in neuronfiles]
+    existing_ingestion = com.get_existing_ingestion_names(neuron_names)
     neuronduplicates = {item["Duplicate"]: {
         "Original": item["Original"],
         "dupimg": item["dupimg"],
@@ -949,9 +1005,10 @@ def setready(folderpath,archive,duplicateresult,foldername):
     }  for item in duplicateresult}
     now = datetime.now()
     dt_string = now.strftime("%Y-%m-%d %H:%M:%S")
+    rows_to_insert = []
     for jtem in neuronfiles:
         neuron_name = jtem[0:-8]
-        if com.isindb('ingestion','neuron_name',neuron_name):
+        if neuron_name in existing_ingestion:
             continue
         elif neuron_name in neuronduplicates.keys():
             dupmessage = """
@@ -977,7 +1034,7 @@ def setready(folderpath,archive,duplicateresult,foldername):
         </tr>
     </tbody></table>
             """.format(neuronduplicates[neuron_name]["Original"],neuronduplicates[neuron_name]["dupimg"],neuronduplicates[neuron_name]["orgimg"],neuronduplicates[neuron_name]["srcfilesame"])
-            com.insert('ingestion',{
+            rows_to_insert.append({
                 'neuron_name': neuron_name,
                 'status': 'warning',
                 'archive': archive,
@@ -985,14 +1042,15 @@ def setready(folderpath,archive,duplicateresult,foldername):
                 'message': dupmessage
             })
         else:
-            com.insert('ingestion',{
+            rows_to_insert.append({
                 'neuron_name': neuron_name,
                 'status': 'read',
                 'archive': archive,
                 'ingestion_date': dt_string,
                 'message': "Neuron ready for ingestion"
             })
-    if len(duplicateresult) > 1:
+    com.insert_ingestion_rows(rows_to_insert)
+    if len(duplicateresult) > 0:
         status = 'warning'
         message = 'Duplicates detected'
     else:
@@ -1192,63 +1250,83 @@ def delete_review_archive_files(archive, neuronarr):
             logging.info('Deleted review archive gif: %s', gif_path)
     
 
-def readpvecmes(foldername):
+def readpvecmes(foldername, progress_cb=None, threads=None):
     """
     Calls pvec conversion service, writes to files and returns json object 
     """
     swcpath = os.path.join(cfg.datapath,foldername,'CNG Version')
-    swcfiles = os.listdir(swcpath)
+    swcfiles = sorted([item for item in os.listdir(swcpath) if item.endswith('.swc')])
+    threads = threads or _read_pvec_threads()
     
     #interact with pvec calculation service
     pvecurl = cfg.pvecurl
     logging.info('pvecurl: {}'.format(pvecurl))
-
-    r = requests.get(pvecurl + 'clearpvecs')
-    logging.info('r: {}'.format(r))
-    
-    for item in swcfiles:
-        files = {'file': open(os.path.join(swcpath,item),'rb')}
-        r = requests.post(pvecurl + 'sendfile', files=files)
-    r = requests.get(pvecurl + 'calcpvecs')
-    time.sleep(len(swcfiles)/15)
-    r = requests.get(pvecurl + 'getjson')
-    ar = r.json()
     
     neuron_names = [item[0:-8] for item in swcfiles]
     measurementsmap = ingest.mapneurontomeasurements(foldername)
-    datarows = []
     pvecpath = os.path.join(cfg.datapath,foldername,"pvec")
     if not os.path.isdir(pvecpath):
         os.mkdir(pvecpath)
-    for neuron_name in neuron_names:
-        
-        pvecpath = os.path.join(cfg.datapath,foldername,"pvec",neuron_name + ".CNG.pvec")
-        if os.path.isfile(pvecpath):
-            with open(pvecpath) as pfile:
-                line1 = pfile.readline()
-                coeffs = pfile.readline().split()
-                coeffs = [float(item) for item in coeffs]
-            nmes = measurementsmap[0][neuron_name]
-            pvecmes ={
-                "neuron_name": neuron_name,
-                "distance": line1[0],
-                "Sfactor": line1[1],
-                "data": coeffs + [float(nmes[item]) if not math.isnan(nmes[item]) else float(0) for item in nmes]
-            }
-        else:
+
+    missing_swcfiles = [
+        item for item in swcfiles
+        if not os.path.isfile(os.path.join(pvecpath, item[0:-8] + ".CNG.pvec"))
+    ]
+    if progress_cb:
+        progress_cb(0, max(1, len(missing_swcfiles)), 'PVec files missing: {}; existing: {}; threads: {}'.format(
+            len(missing_swcfiles),
+            len(swcfiles) - len(missing_swcfiles),
+            threads,
+        ))
+
+    if missing_swcfiles:
+        with requests.Session() as session:
+            r = session.get(pvecurl + 'clearpvecs')
+            r.raise_for_status()
+            logging.info('clearpvecs response: {}'.format(r))
+
+            for index, item in enumerate(missing_swcfiles, start=1):
+                if progress_cb and (index == 1 or index == len(missing_swcfiles) or index % 100 == 0):
+                    progress_cb(index, len(missing_swcfiles), 'Uploading PVec input {} / {}: {}'.format(index, len(missing_swcfiles), item))
+                with open(os.path.join(swcpath,item),'rb') as handle:
+                    files = {'file': handle}
+                    r = session.post(pvecurl + 'sendfile', files=files)
+                    r.raise_for_status()
+            if progress_cb:
+                progress_cb(len(missing_swcfiles), len(missing_swcfiles), 'Calculating PVecs with {} thread(s)'.format(threads))
+            r = session.get(pvecurl + 'calcpvecs', params={'threads': threads})
+            r.raise_for_status()
+            calc_result = r.json()
+            if calc_result.get('result') == 'error':
+                raise RuntimeError(calc_result.get('message', 'PVec calculation failed'))
+            r = session.get(pvecurl + 'getjson')
+            r.raise_for_status()
+            ar = r.json()
+
+        for item in missing_swcfiles:
+            neuron_name = item[0:-8]
+            if neuron_name not in ar.get('pvecs', {}):
+                raise KeyError('PVec service did not return {}'.format(neuron_name))
             npvec = ar['pvecs'][neuron_name]
-            # write to pvec file as it is needed later in ingestion
-            with open(pvecpath,'w') as pfile:
+            outpath = os.path.join(pvecpath,neuron_name + ".CNG.pvec")
+            with open(outpath,'w') as pfile:
                 line1 = '{} {}\n'.format(npvec['distance'],npvec['Sfactor'])
                 line2 = ' '.join([item for item in npvec['vector']])
                 pfile.writelines([line1,line2])
-            nmes = measurementsmap[0][neuron_name]
-            pvecmes ={
-                "neuron_name": neuron_name,
-                "distance": npvec['distance'],
-                "Sfactor": npvec['Sfactor'],
-                "data": [float(item) for item in npvec['vector']] + [float(nmes[item]) if not math.isnan(nmes[item]) else float(0) for item in nmes]
-            }
+
+    datarows = []
+    for neuron_name in neuron_names:
+        outpath = os.path.join(pvecpath,neuron_name + ".CNG.pvec")
+        with open(outpath) as pfile:
+            line1 = pfile.readline().split()
+            coeffs = [float(item) for item in pfile.readline().split()]
+        nmes = measurementsmap[0][neuron_name]
+        pvecmes ={
+            "neuron_name": neuron_name,
+            "distance": line1[0],
+            "Sfactor": line1[1],
+            "data": coeffs + [float(nmes[item]) if not math.isnan(nmes[item]) else float(0) for item in nmes]
+        }
         datarows.append(pvecmes)
     return datarows
 
@@ -1636,54 +1714,123 @@ class DuplicateException(Exception):
         return(repr(self.value))
 
 
-def exporttomain(foldername, progress_cb=None, should_stop=None):
+def _sanitize_export_threads(threads):
+    try:
+        threads = int(threads)
+    except (TypeError, ValueError):
+        threads = 1
+    if threads >= 8:
+        return 8
+    if threads >= 4:
+        return 4
+    if threads >= 2:
+        return 2
+    return 1
+
+
+def _export_to_main_neuron(neuron_name):
+    status = "public"
+    message = "Neuron exported to main"
+    exported = False
+    session = com.get_workflow_session()
+    try:
+        exportneuron(neuron_name, update_status=False)
+        exported = True
+    except mysql.connector.errors.IntegrityError as e:
+        if '1062' in str(e):
+            logging.info("Ignoring duplicate during export to main for %s: %s", neuron_name, e)
+            message = "Duplicate already existed in main"
+            exported = True
+        else:
+            status = 'error'
+            message = str(e)
+            logging.exception("Error during export of neuron %s to main", neuron_name)
+    except Exception as e:
+        status = 'error'
+        message = str(e)
+        logging.exception("Error during export of neuron %s to main", neuron_name)
+    finally:
+        com.updateneuronstatus_fast(session, neuron_name, status, message)
+    return neuron_name, {
+        'status': status,
+        'message': message,
+        'exported': exported,
+    }
+
+
+def exporttomain(foldername, progress_cb=None, should_stop=None, threads=1):
     archive = namefromfolder(foldername)
+    threads = _sanitize_export_threads(threads)
     com.close_workflow_sessions()
     com.clear_workflow_caches()
     (resultnames, resultids) = com.getarchiveneurons(archive, skip_public=True)
+    resultnames = sorted(resultnames)
     total = len(resultnames)
     exportednames = []
     had_error = False
     if progress_cb:
-        progress_cb(0, total, 'Loaded {} neuron(s) to export'.format(total))
-    for index, item in enumerate(resultnames, start=1):
-        status = "success"
-        message = "Neuron exported to main"
-        if should_stop and should_stop():
-            if progress_cb:
-                progress_cb(index - 1, total, 'Stop requested. Export paused after current neuron.', 'stopped')
-            break
-        try:
-            status = "public"
-            myitem = exportneuron(item)
-            exportednames.append(item)
+        progress_cb(0, total, 'Loaded {} neuron(s) to export with {} thread(s)'.format(total, threads))
 
-        except mysql.connector.errors.IntegrityError as e:
-            # If it's a duplicate entry error
-            if '1062' in str(e):
-                print(f"Ignoring duplicated entry error: {e}")
-                status = "public"
-                message = "Duplicate already existed in main"
-                exportednames.append(item)
-            else:
-                # If it's another type of IntegrityError
-                oldid = 0
-                status = 'error'
-                message = str(e)
+    if threads <= 1:
+        for index, item in enumerate(resultnames, start=1):
+            if should_stop and should_stop():
+                if progress_cb:
+                    progress_cb(index - 1, total, 'Stop requested. Export paused after current neuron.', 'stopped')
+                break
+            neuron_name, neuron_result = _export_to_main_neuron(item)
+            if neuron_result.get('exported'):
+                exportednames.append(neuron_name)
+            if neuron_result.get('status') == 'error':
                 had_error = True
-                logging.exception("Error during export of neurons to main")
-
-        except Exception as e:
-            oldid = 0
-            status = 'error'
-            message = str(e)
-            had_error = True
-            logging.exception("Error during export of neurons to main")
-
-        finally:
-            com.updateneuronstatus(item, status, message)
             if progress_cb:
-                progress_cb(index, total, 'Exported {} / {}: {}'.format(index, total, item))
+                progress_cb(index, total, 'Exported {} / {}: {} ({})'.format(index, total, neuron_name, neuron_result.get('status')))
+    else:
+        iterator = iter(resultnames)
+        pending = {}
+        counter = 0
+        max_pending = max(threads * 2, threads)
+
+        def submit_next(executor):
+            if should_stop and should_stop():
+                return False
+            try:
+                neuron_name = next(iterator)
+            except StopIteration:
+                return False
+            future = executor.submit(_export_to_main_neuron, neuron_name)
+            pending[future] = neuron_name
+            if progress_cb:
+                progress_cb(counter, total, 'Queued export {}'.format(neuron_name))
+            return True
+
+        with ThreadPoolExecutor(max_workers=threads) as executor:
+            while len(pending) < max_pending and submit_next(executor):
+                pass
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    queued_name = pending.pop(future)
+                    try:
+                        neuron_name, neuron_result = future.result()
+                    except Exception as e:
+                        neuron_name = queued_name
+                        neuron_result = {
+                            'status': 'error',
+                            'message': str(e),
+                            'exported': False,
+                        }
+                        session = com.get_workflow_session()
+                        com.updateneuronstatus_fast(session, neuron_name, 'error', str(e))
+                        logging.exception("Error during threaded export of neurons to main")
+                    counter += 1
+                    if neuron_result.get('exported'):
+                        exportednames.append(neuron_name)
+                    if neuron_result.get('status') == 'error':
+                        had_error = True
+                    if progress_cb:
+                        progress_cb(counter, total, 'Exported {} / {}: {} ({})'.format(counter, total, neuron_name, neuron_result.get('status')))
+                    if not (should_stop and should_stop()):
+                        submit_next(executor)
 
     if had_error:
         logging.warning("Export to main completed with errors for archive {}".format(archive))
@@ -1926,7 +2073,7 @@ def publishtweets(version,nneurons,archivename,neuron_name,folders):
     #     api.create_tweet(text=message,)
 
 
-def exportneuron(neuron_name, folder_name=None, ingest_export_data=None):
+def exportneuron(neuron_name, folder_name=None, ingest_export_data=None, update_status=True):
 
     session = com.get_workflow_session()
     item = com.getneurondata_fast(neuron_name, session=session)
@@ -1963,7 +2110,8 @@ def exportneuron(neuron_name, folder_name=None, ingest_export_data=None):
     status = 'success'
     neuronstatus = 'ingested'
     message = 'Neuron exported successfully'
-    com.updateneuronstatus_fast(session, neuron_name,neuronstatus,message)
+    if update_status:
+        com.updateneuronstatus_fast(session, neuron_name,neuronstatus,message)
     return {
         'status': status,
         'message': message
@@ -2345,7 +2493,7 @@ def transferimages():
         sftp.sshclient.close()
 
 
-def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None):
+def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None, threads=1):
     # check that archive has status "published"
     # sync arhives using rsync
     # import to mysql all records
@@ -2367,6 +2515,17 @@ def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None):
                     destfile = os.path.join(target_root, filename)
                     if not os.path.exists(destfile) or os.path.getmtime(srcfile) > os.path.getmtime(destfile):
                         shutil.copy2(srcfile, destfile)
+
+    def transferfiles(file_pairs):
+        copied = 0
+        for src, dest in file_pairs:
+            if not os.path.exists(src):
+                continue
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            if not os.path.exists(dest) or os.path.getmtime(src) > os.path.getmtime(dest):
+                shutil.copy2(src, dest)
+                copied += 1
+        return copied
 
     archive = namefromfolder(foldername)
     def notify(current, total, message, status='running'):
@@ -2393,9 +2552,20 @@ def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None):
 
     srcdir = cfg.sshdir + "rotatingImages/"
     destdir = cfg.sshmaindir + "rotatingImages/"
+    neuronlist, neuronids = com.getarchiveneurons(archive)
     logging.info("main release {} *** {}".format(srcdir,destdir))
-    transferfolder(srcdir,destdir)
-    notify(35, 100, 'Copied rotatingImages')
+    if islocal:
+        copied_gifs = transferfiles([
+            (
+                os.path.join(srcdir, "{}.CNG.gif".format(neuron_name)),
+                os.path.join(destdir, "{}.CNG.gif".format(neuron_name)),
+            )
+            for neuron_name in neuronlist
+        ])
+    else:
+        transferfolder(srcdir,destdir)
+        copied_gifs = len(neuronlist)
+    notify(35, 100, 'Copied rotatingImages for {} neuron(s); {} file(s) updated'.format(len(neuronlist), copied_gifs))
     
     srcfile = cfg.sshdir + "acknowl.jsp"
     destfile = cfg.sshmaindir + "acknowl.jsp"
@@ -2415,7 +2585,7 @@ def mainrelease(foldername,dt_string, progress_cb=None, should_stop=None):
             scaled = 90
         notify(scaled, 100, message, status)
 
-    neuron_names = exporttomain(foldername, progress_cb=export_progress, should_stop=should_stop)
+    neuron_names = exporttomain(foldername, progress_cb=export_progress, should_stop=should_stop, threads=threads)
     if should_stop and should_stop():
         notify(90, 100, 'Stop requested. Export paused before final upload-date update.', 'stopped')
         if not islocal:

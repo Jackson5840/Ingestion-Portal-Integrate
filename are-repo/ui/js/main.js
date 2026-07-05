@@ -399,10 +399,20 @@ function readarchive(archive_name) {
     */
     if (!document.getElementById(progressWrapId)) {
         $('#' + archive_name + '_button').closest('.btn-group').after(`
-            <div id="${progressWrapId}" class="progress mt-2 mb-2" style="height: 20px;">
-                <div id="${progressId}" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+            <div id="${progressWrapId}" class="mt-2 mb-2 px-2 py-2 bg-light rounded">
+                <div class="d-flex align-items-center">
+                    <div class="progress flex-grow-1" style="height: 20px;">
+                        <div id="${progressId}" class="progress-bar progress-bar-striped progress-bar-animated bg-info" role="progressbar" style="width: 0%">0%</div>
+                    </div>
+                    <button id="${archive_name}_read_stop" class="btn btn-outline-danger btn-sm ml-2" type="button" onclick="stopArchiveJob('${archive_name}', 'read')">Stop</button>
+                </div>
+                <div class="d-flex align-items-center mt-1">
+                    <div id="${progressTextId}" class="small text-muted flex-grow-1">Starting archive read...</div>
+                    <button id="${archive_name}_read_log_toggle" class="btn btn-link btn-sm p-0 ml-2" type="button" style="display:none;" onclick="toggleArchiveJobLog('${archive_name}', 'read')">Show log</button>
+                </div>
+                <div class="small text-muted text-truncate" title="" id="${archive_name}_read_progress_latest"></div>
+                <div id="${archive_name}_read_progress_log" class="small text-monospace text-muted mt-1 pl-2" style="display:none; max-height:140px; overflow:auto;"></div>
             </div>
-            <div id="${progressTextId}" class="small text-muted mb-2">Starting archive read...</div>
         `);
     }
     const poller = setInterval(function () {
@@ -410,19 +420,22 @@ function readarchive(archive_name) {
             url: serverbase + 'checkreadarchive/' + archive_name,
             type: 'GET',
             success: function (presult) {
-                const progress = Math.max(0, Math.min(100, parseFloat(presult.progress || 0)));
-                $('#' + progressId).css('width', progress + '%').text(Math.round(progress) + '%');
-                $('#' + progressId).attr('aria-valuenow', progress);
-                $('#' + progressTextId).text(presult.message || 'Reading archive...');
+                updateArchiveJobProgress(archive_name, 'read', presult);
 
-                if (presult.status === 'success' || presult.status === 'error') {
+                if (presult.status === 'success' || presult.status === 'error' || presult.status === 'stopped') {
                     clearInterval(poller);
                     if (presult.status === 'success') {
                         $('#' + progressId).removeClass('progress-bar-animated progress-bar-striped bg-info').addClass('bg-success');
                         $('#' + progressTextId).text(presult.message || 'Archive read complete');
+                        refreshArchiveViews();
+                    } else if (presult.status === 'stopped') {
+                        $('#' + progressId).removeClass('progress-bar-animated progress-bar-striped bg-info').addClass('bg-warning');
+                        $('#' + progressTextId).text(presult.message || 'Archive read stopped');
+                        $('#' + archive_name + '_button').prop('disabled', false);
                     } else {
                         $('#' + progressId).removeClass('progress-bar-animated progress-bar-striped bg-info').addClass('bg-danger');
                         $('#' + progressTextId).text(presult.message || 'Archive read failed');
+                        $('#' + archive_name + '_button').prop('disabled', false);
                     }
                 }
             }
@@ -438,9 +451,13 @@ function readarchive(archive_name) {
     error: function () {
         console.log("Error!!!");
         alert("Read error: UNKNOW ERROR.");
+        $('#' + archive_name + '_button').prop('disabled', false);
     },
     success: function (result) {
         console.log(result)
+        if (['started', 'running'].includes(result.status)) {
+            return;
+        }
         if (result.status == 'error') {
             alert("Read error: " + (result.message));
             abutton = document.getElementById(archive_name + "_button")
@@ -457,20 +474,26 @@ function readarchive(archive_name) {
 
         }
             
-        activearchives = JSON.parse(getarchives());;
-        if (activearchives.status == 'error') {
-            window.alert("Archive csv-file mismatch!");
-            return;
-        }
-        abutton = document.getElementById("read_button");
-        abutton.classList.remove('disabled');
-        $(".container").empty()
-        createDataPanel(activearchives.data)
-        $(".archivecont").empty()
-        createArchivePanel(activearchives.data)		
+        refreshArchiveViews();
     },
     type: 'POST'
     }); 
+}
+
+function refreshArchiveViews() {
+    activearchives = JSON.parse(getarchives());
+    if (activearchives.status == 'error') {
+        window.alert("Archive csv-file mismatch!");
+        return;
+    }
+    abutton = document.getElementById("read_button");
+    if (abutton) {
+        abutton.classList.remove('disabled');
+    }
+    $(".container").empty()
+    createDataPanel(activearchives.data)
+    $(".archivecont").empty()
+    createArchivePanel(activearchives.data)
 }
 
 function getReadSteps(archive_name) {
@@ -898,7 +921,7 @@ function updateArchiveJobProgress(archive_name, job, result) {
         }
     }
     var threadSelect = document.getElementById(archive_name + '_' + job + '_threads');
-    if (threadSelect && job === 'ingest' && !['running', 'stopping'].includes(status)) {
+    if (threadSelect && !['running', 'stopping'].includes(status)) {
         threadSelect.disabled = false;
     }
 }
@@ -916,7 +939,7 @@ function toggleArchiveJobLog(archive_name, job) {
 }
 
 function stopArchiveJob(archive_name, job) {
-    var endpoint = job === 'ingest' ? 'stopingestarchive/' : 'stopexporttomain/';
+    var endpoint = job === 'ingest' ? 'stopingestarchive/' : (job === 'read' ? 'stopreadarchive/' : 'stopexporttomain/');
     $.ajax({
         url: serverbase + endpoint + archive_name,
         type: 'POST',
@@ -929,13 +952,15 @@ function stopArchiveJob(archive_name, job) {
 function resumeArchiveJob(archive_name, job) {
     if (job === 'ingest') {
         ingestallneurons(archive_name);
+    } else if (job === 'read') {
+        readarchive(archive_name);
     } else {
         exporttomain(archive_name);
     }
 }
 
 function pollArchiveJob(archive_name, job, buttonId, successText, stoppedText, errorText) {
-    var endpoint = job === 'ingest' ? 'checkingestarchive/' : 'checkexporttomain/';
+    var endpoint = job === 'ingest' ? 'checkingestarchive/' : (job === 'read' ? 'checkreadarchive/' : 'checkexporttomain/');
     var pollKey = archive_name + '_' + job;
     if (archiveJobPollers[pollKey]) {
         clearTimeout(archiveJobPollers[pollKey]);
@@ -1114,23 +1139,37 @@ function genwinjsp(archive_name) {
 }
 
 function exporttomain(archive_name) {
+    var threadsElem = document.getElementById(archive_name + '_exportmain_threads');
+    var threads = threadsElem ? threadsElem.value : '1';
+    if (threadsElem) {
+        threadsElem.disabled = true;
+    }
     $('#' + archive_name + '_mbutton').prop('disabled', true)
     $('#' + archive_name + '_mbutton').html(
         `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Exporting to main...`
     );
     $.ajax({
-		url: serverbase + 'exporttomain/' + archive_name,
+		url: serverbase + 'exporttomain/' + archive_name + '?threads=' + encodeURIComponent(threads),
 		error: function () {
 			console.log("Error!");
+            if (threadsElem) {
+                threadsElem.disabled = false;
+            }
 		},
 			success: function (result) {
 	            console.log(result)
 	            if (['started', 'running'].includes(result['status'])) {
                     pollArchiveJob(archive_name, 'exportmain', archive_name + '_mbutton', 'Exported successfully to main', 'Export stopped', 'Exported to main failed');
 	            } else if (result['status'] == 'success') {
+                    if (threadsElem) {
+                        threadsElem.disabled = false;
+                    }
 	                $('#' + archive_name + '_mbutton').html(`Exported successfully to main`);
 	            } else {
                     $('#' + archive_name + '_mbutton').prop('disabled', false)
+                    if (threadsElem) {
+                        threadsElem.disabled = false;
+                    }
 	                $('#' + archive_name + '_mbutton').html(`Exported to main failed`);
 	            }
 	            
@@ -1231,6 +1270,17 @@ function createDataPanel(archives){
         </td>
         <td><button id="${archive.name}_ibutton" ${idisabled} class="btn btn-primary btn-sm" type="button" style="float:right" onclick="ingestallneurons('${archive.name}',dm)">Ingest Archive</button></td>
         <td><button id="${archive.name}_wbutton" class="btn btn-primary btn-sm" type="button" style="float:right" onclick="genwinjsp('${archive.name}')">Publish WIN.jsp</button></td>
+        <td>
+            <div class="input-group input-group-sm" style="min-width:118px;">
+                <div class="input-group-prepend"><span class="input-group-text">Export</span></div>
+                <select id="${archive.name}_exportmain_threads" class="custom-select custom-select-sm">
+                    <option value="1" selected>1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                </select>
+            </div>
+        </td>
         <td><button id="${archive.name}_mbutton" class="btn btn-primary btn-sm" type="button" style="float:right" onclick="exporttomain('${archive.name}')">Export to main</button></td>
         <td><button id="${archive.name}_rbutton" ${rdisabled}  class="btn btn-primary btn-sm" type="button" style="float:right" onclick="deleteneurons('${archive.name}',dm)">Revert Archive</button></td>
         <td><button id="${archive.name}_arbutton" ${rdisabled}  class="btn btn-primary btn-sm" type="button" style="float:right" onclick="archiveneurons('${archive.name}',dm)">Archive neurons</button></td>
