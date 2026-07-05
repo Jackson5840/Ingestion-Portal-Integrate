@@ -1619,7 +1619,7 @@ class DuplicateException(Exception):
 
 def exporttomain(foldername, progress_cb=None, should_stop=None):
     archive = namefromfolder(foldername)
-    com.clear_checkexists_cache()
+    com.clear_workflow_caches()
     (resultnames, resultids) = com.getarchiveneurons(archive, skip_public=True)
     total = len(resultnames)
     exportednames = []

@@ -196,7 +196,8 @@ Read Archive -> Ingest Archive -> review in Tomcat -> Export to main
 - Resume starts ingest again and only processes `read`, `warning`, or `error` neurons.
 - Skips neurons already present in MySQL review DB and marks them `ingested`.
 - Ensures MySQL `archive` row exists before calling the ingest stored procedure.
-- Protects shared lookup/cache paths during threaded ingest and retries transient MySQL insert deadlocks.
+- Caches repeated region/celltype/publication lookups inside each workflow and retries transient MySQL insert deadlocks.
+- Writes per-neuron stage timing into `app.log`; progress log shows total time and slowest stage.
 - Copies neuron files to the review Tomcat webapp.
 
 Kummer benchmark from this environment:

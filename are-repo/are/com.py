@@ -10,6 +10,9 @@ import threading
 import time
 
 _checkexists_cache = {}
+_pg_region_cache = {}
+_pg_celltype_cache = {}
+_publication_cache = {}
 _checkexists_lock = threading.RLock()
 _pg_reference_lock = threading.RLock()
 _publication_lock = threading.RLock()
@@ -19,6 +22,19 @@ _TRANSIENT_MYSQL_ERRORS = {1205, 1213}
 def clear_checkexists_cache():
     with _checkexists_lock:
         _checkexists_cache.clear()
+
+
+def clear_reference_caches():
+    with _pg_reference_lock:
+        _pg_region_cache.clear()
+        _pg_celltype_cache.clear()
+    with _publication_lock:
+        _publication_cache.clear()
+
+
+def clear_workflow_caches():
+    clear_checkexists_cache()
+    clear_reference_caches()
 
 
 def _is_duplicate_error(exc):
@@ -1067,74 +1083,91 @@ def ingestneuron(d):
     conn.close()
     return neuron_id
 
-@myconnect
-def getarticleid(conn,pmid,doi):
+def getarticleid(pmid,doi):
     """ Gets the article id for insertion.
     """
+    cache_key = (cfg.dbsel, str(pmid), str(doi or ''))
     with _publication_lock:
+        if cache_key in _publication_cache:
+            return _publication_cache[cache_key]
+        conn = mysc.connect(
+            user=cfg.dbuser,
+            password=cfg.dbpass,
+            host=cfg.dbhost,
+            database=cfg.dbsel,
+            auth_plugin=cfg.db_auth_plugin,
+        )
+        conn.autocommit = True
         cur = conn.cursor()
-        if doi is not None:
-            isref = validators.url(doi)
-        else:
-            isref = False
-        if pmid > 0:
-            stmt = "SELECT DISTINCT article_id,PMID FROM neuron_article where PMID = {}".format(pmid)
-        else:
-            if isref:
-                stmt = "SELECT DISTINCT reference_article.article_id, neuron_article.PMID FROM reference_article,neuron_article where neuron_article.article_id = reference_article.article_id AND reference_article.article_URL = '{}'".format(doi)
+        try:
+            if doi is not None:
+                isref = validators.url(doi)
             else:
-                stmt = "SELECT DISTINCT article_id, neuron_article.PMID FROM neuron_article, AllPublications where neuron_article.PMID = AllPublications.PMID AND AllPublications.DOI = '{}'".format(doi)
-        cur.execute(stmt)
-        res = cur.fetchone()
-        if res is not None:
-            return (res[0],res[1])
+                isref = False
+            if pmid > 0:
+                stmt = "SELECT DISTINCT article_id,PMID FROM neuron_article where PMID = {}".format(pmid)
+            else:
+                if isref:
+                    stmt = "SELECT DISTINCT reference_article.article_id, neuron_article.PMID FROM reference_article,neuron_article where neuron_article.article_id = reference_article.article_id AND reference_article.article_URL = '{}'".format(doi)
+                else:
+                    stmt = "SELECT DISTINCT article_id, neuron_article.PMID FROM neuron_article, AllPublications where neuron_article.PMID = AllPublications.PMID AND AllPublications.DOI = '{}'".format(doi)
+            cur.execute(stmt)
+            res = cur.fetchone()
+            if res is not None:
+                result = (res[0],res[1])
+                _publication_cache[cache_key] = result
+                return result
 
-        if pmid > 0:
-            pmrecord = io.fetchpmarticle(str(pmid))
-        else:
+            if pmid > 0:
+                pmrecord = io.fetchpmarticle(str(pmid))
+            else:
+                
+                if isref:
+                    pmrecord = io.fetchurlreference(doi)
+                    stmt = 'SELECT MAX(PMID) FROM AllPublications'
+                    cur.execute(stmt)
+                    res = cur.fetchone()
+                    pmid = max(res[0]+1,100000000)
+                else:
+                    stmt = 'SELECT MIN(PMID) FROM AllPublications'
+                    cur.execute(stmt)
+                    res = cur.fetchone()
+                    pmid = res[0]-1
+                    pmrecord = io.fetchdoiarticle(doi)
+            stmt = 'SELECT PMID FROM AllPublications where PMID = {}'.format(pmid)
+            cur.execute(stmt)
+            res = cur.fetchone()
+            if res is None:
+                now = datetime.now()
+                dt_string = now.strftime("%Y-%m-%d %H:%M:%S")
+                pubrec = {
+                    'PMID': pmid,
+                    'DOI': pmrecord['doi'],
+                    'Year': pmrecord['year'],
+                    'Journal': pmrecord['journal'],
+                    'Paper_Title': pmrecord['article_title'],
+                    'First_Author': pmrecord['first_author'],
+                    'Last_Author': pmrecord['last_author'],
+                    'OCDate': dt_string,
+                    'Data_Status': 'In the repository'
+                }
+                if isref:
+                    del pubrec['DOI']
+                myinsert('AllPublications', pubrec)
+            refrec = pmrecord
+            del refrec["first_author"] 
+            del refrec["last_author"] 
+            del refrec["journal"] 
+            del refrec["doi"] 
+            del refrec["year"]
             
-            if isref:
-                pmrecord = io.fetchurlreference(doi)
-                stmt = 'SELECT MAX(PMID) FROM AllPublications'
-                cur.execute(stmt)
-                res = cur.fetchone()
-                pmid = max(res[0]+1,100000000)
-            else:
-                stmt = 'SELECT MIN(PMID) FROM AllPublications'
-                cur.execute(stmt)
-                res = cur.fetchone()
-                pmid = res[0]-1
-                pmrecord = io.fetchdoiarticle(doi)
-        stmt = 'SELECT PMID FROM AllPublications where PMID = {}'.format(pmid)
-        cur.execute(stmt)
-        res = cur.fetchone()
-        if res is None:
-            now = datetime.now()
-            dt_string = now.strftime("%Y-%m-%d %H:%M:%S")
-            pubrec = {
-                'PMID': pmid,
-                'DOI': pmrecord['doi'],
-                'Year': pmrecord['year'],
-                'Journal': pmrecord['journal'],
-                'Paper_Title': pmrecord['article_title'],
-                'First_Author': pmrecord['first_author'],
-                'Last_Author': pmrecord['last_author'],
-                'OCDate': dt_string,
-                'Data_Status': 'In the repository'
-            }
-            if isref:
-                del pubrec['DOI']
-            myinsert('AllPublications', pubrec)
-        refrec = pmrecord
-        del refrec["first_author"] 
-        del refrec["last_author"] 
-        del refrec["journal"] 
-        del refrec["doi"] 
-        del refrec["year"]
-        
-        res = myinsert('reference_article',refrec)
+            res = myinsert('reference_article',refrec)
 
-        return  (res,pmid)
+            result = (res,pmid)
+            _publication_cache[cache_key] = result
+            return result
+        finally:
+            conn.close()
 
 
 @pgconnect
@@ -1443,46 +1476,50 @@ def checkexists(conn,table,indexfield, fields):
 def ingestregion(adict):
     # Checks dict for region fields
     # Wraps fields into array string for postgres stored procedure
+    proceed = True
+
+    reg1 = adict.get('region1','')
+    if reg1 == 'Not reported' or reg1 == '':
+
+        raise Exception('Region 1 must have value')
+    else:
+        pgarr = "array['{}'".format(reg1.replace("'","''").strip())
+        path = cleanstr(reg1)
+    reg2 = adict.get('region2','')
+    if reg2 == 'Not reported' or reg2 == '':
+        proceed = False
+    else:
+        pgarr += ",'{}'".format(reg2.replace("'","''").strip())
+        path += '.' + cleanstr(reg2)
+    reg3 = adict.get('region3','')
+    if reg3 == 'Not reported' or reg3 == '' and proceed:
+        proceed = False
+    elif proceed:
+        path += '.' + cleanstr(reg3)
+        pgarr += ",'{}'".format(reg3.replace("'","''").strip())
+    reg3B = adict.get('region3B','')
+    if reg3B == 'Not reported' or reg3B == '' and proceed:
+        pass        
+    elif proceed:
+        regarr = reg3B.split(',')
+        for item in regarr:
+            pgarr += ",'{}'".format(cleanval(item.replace("'","''").strip()))
+            path += '.' + cleanstr(item)
+    pgarr += "]"
+    cache_key = (cfg.pg_database, path, pgarr)
     with _pg_reference_lock:
+        if cache_key in _pg_region_cache:
+            return _pg_region_cache[cache_key]
         conn=connect()
-        cur = conn.cursor()
-        
-        proceed = True
-        path2 = ''
-
-        reg1 = adict.get('region1','')
-        if reg1 == 'Not reported' or reg1 == '':
-
-            raise Exception('Region 1 must have value')
-        else:
-            pgarr = "array['{}'".format(reg1.replace("'","''").strip())
-            path = cleanstr(reg1)
-        reg2 = adict.get('region2','')
-        if reg2 == 'Not reported' or reg2 == '':
-            proceed = False
-        else:
-            pgarr += ",'{}'".format(reg2.replace("'","''").strip())
-            path += '.' + cleanstr(reg2)
-        reg3 = adict.get('region3','')
-        if reg3 == 'Not reported' or reg3 == '' and proceed:
-            proceed = False
-        elif proceed:
-            path += '.' + cleanstr(reg3)
-            pgarr += ",'{}'".format(reg3.replace("'","''").strip())
-        reg3B = adict.get('region3B','')
-        if reg3B == 'Not reported' or reg3B == '' and proceed:
-            pass        
-        elif proceed:
-            regarr = reg3B.split(',')
-            for item in regarr:
-                pgarr += ",'{}'".format(cleanval(item.replace("'","''").strip()))
-                path += '.' + cleanstr(item)
-        pgarr += "]"
-        cur.execute("CALL ingest_region({},'{}')".format(pgarr,path)) #TODO check if paranthesis should be here
-        cur.execute("SELECT id from region where path = '{}';".format(path))
-        theid = cur.fetchone()
-        conn.close()
-        return theid[0]
+        try:
+            cur = conn.cursor()
+            cur.execute("CALL ingest_region({},'{}')".format(pgarr,path)) #TODO check if paranthesis should be here
+            cur.execute("SELECT id from region where path = '{}';".format(path))
+            theid = cur.fetchone()
+            _pg_region_cache[cache_key] = theid[0]
+            return theid[0]
+        finally:
+            conn.close()
     # Strips invalid characters from path elements string.
     # Concatenates path elements into ltree path
     # Calls stored procedure to ingest region at lowest level if needed
@@ -1492,54 +1529,56 @@ def ingestregion(adict):
 def ingestcelltype(adict):
     # Checks dict for celltype fields
     # Wraps fields into array string for postgres stored procedure
+    proceed = True
+
+    reg1 = adict.get('class1','')
+    if reg1 == 'Not reported' or reg1 == '':
+        #raise Exception('class 1 must have value')
+        return 0
+    else:
+        pgarr = "array['{}'".format(reg1)
+        path = cleanstr(reg1.replace("'","''").strip())
+    reg2 = adict.get('class2','')
+    if reg2 == 'Not reported' or reg2 == '':
+        proceed = False
+    else:
+        pgarr += ",'{}'".format(reg2)
+        path += '.' + cleanstr(reg2.replace("'","''").strip())
+    reg3 = adict.get('class3','')
+    if reg3 == 'Not reported'  or reg3 == '' and proceed:
+        proceed = False
+    elif proceed:
+        path += '.' + cleanstr(reg3)
+        pgarr += ",'{}'".format(reg3.replace("'","''").strip())
+    reg3B = adict.get('class3B','')
+    if reg3B == 'Not reported'  or reg3B == '' and proceed:
+        proceed = False
+    elif proceed:
+        path += '.' + cleanstr(reg3B)
+        pgarr += ",'{}'".format(reg3B.replace("'","''").strip())
+    reg3C = adict.get('class3C','')
+    if reg3C == 'Not reported' or reg3C == '' and proceed:
+        pass        
+    elif proceed:
+        regarr = reg3C.split(',')
+        for item in regarr:
+            pgarr += ",'{}'".format(item.replace("'","''").strip())
+            path += '.' + cleanstr(item)
+    pgarr += "]"
+    cache_key = (cfg.pg_database, path, pgarr)
     with _pg_reference_lock:
+        if cache_key in _pg_celltype_cache:
+            return _pg_celltype_cache[cache_key]
         conn=connect()
-        cur = conn.cursor()
-        
-        proceed = True
-
-        reg1 = adict.get('class1','')
-        if reg1 == 'Not reported' or reg1 == '':
-            #raise Exception('class 1 must have value')
+        try:
+            cur = conn.cursor()
+            cur.execute("CALL ingest_celltype({},'{}')".format(pgarr,path))
+            cur.execute("SELECT id from celltype where path = '{}';".format(path))
+            theid = cur.fetchone()
+            _pg_celltype_cache[cache_key] = theid[0]
+            return theid[0]
+        finally:
             conn.close()
-            return 0
-        else:
-            pgarr = "array['{}'".format(reg1)
-            path = cleanstr(reg1.replace("'","''").strip())
-        reg2 = adict.get('class2','')
-        if reg2 == 'Not reported' or reg2 == '':
-            proceed = False
-        else:
-            pgarr += ",'{}'".format(reg2)
-            path += '.' + cleanstr(reg2.replace("'","''").strip())
-        reg3 = adict.get('class3','')
-        if reg3 == 'Not reported'  or reg3 == '' and proceed:
-            proceed = False
-        elif proceed:
-            path += '.' + cleanstr(reg3)
-            pgarr += ",'{}'".format(reg3.replace("'","''").strip())
-        reg3B = adict.get('class3B','')
-        if reg3B == 'Not reported'  or reg3B == '' and proceed:
-            proceed = False
-        elif proceed:
-            path += '.' + cleanstr(reg3B)
-            pgarr += ",'{}'".format(reg3B.replace("'","''").strip())
-        reg3C = adict.get('class3C','')
-        if reg3C == 'Not reported' or reg3C == '' and proceed:
-            pass        
-        elif proceed:
-            regarr = reg3C.split(',')
-            for item in regarr:
-                pgarr += ",'{}'".format(item.replace("'","''").strip())
-                path += '.' + cleanstr(item)
-        pgarr += "]"
-        cur.execute("CALL ingest_celltype({},'{}')".format(pgarr,path))
-        cur.execute("SELECT id from celltype where path = '{}';".format(path))
-        theid = cur.fetchone()
-
-        conn.close()
-
-        return theid[0]
 
 @pgconnect
 def getneuronfolder(conn,neuron_name):

@@ -7,6 +7,7 @@ from datetime import date
 import math, redis
 from . import io
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+import time
 
 
 logging.basicConfig(level=logging.INFO,filename='app.log', filemode='w', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
@@ -37,7 +38,36 @@ def representint(s):
     except ValueError:
         return False
 
-def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains):
+def _time_stage(timings, stage, func, *args, **kwargs):
+    started = time.perf_counter()
+    try:
+        return func(*args, **kwargs)
+    finally:
+        if timings is not None:
+            timings[stage] = round(time.perf_counter() - started, 4)
+
+
+def _timing_summary(timings):
+    if not timings:
+        return ''
+    total = timings.get('total')
+    stages = [(stage, elapsed) for stage, elapsed in timings.items() if stage != 'total']
+    if not stages:
+        return '{:.2f}s'.format(total) if total is not None else ''
+    slowest_stage, slowest_elapsed = max(stages, key=lambda item: item[1])
+    if total is None:
+        return 'slowest {}={:.2f}s'.format(slowest_stage, slowest_elapsed)
+    return '{:.2f}s; slowest {}={:.2f}s'.format(total, slowest_stage, slowest_elapsed)
+
+
+def _format_stage_timings(timings):
+    return ', '.join(
+        '{}={:.4f}s'.format(stage, elapsed)
+        for stage, elapsed in sorted(timings.items(), key=lambda item: item[0])
+    )
+
+
+def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains,timings=None):
     # takes one neuron as parameter
     # reads metadata as provided by csv and folder mapping to a dictionary
     # read measurements
@@ -47,11 +77,11 @@ def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains):
     # copy neuron files to the right place
     # neurontodetmeas dicitionary mapping domain to measurements dictionary 
     neurontomeas =  changenotrep(neurontomeas.keys(),neurontomeas)
-    meas_id = com.insert('measurements',neurontomeas)
-    shrinkval_id = com.insert('shrinkagevalue',getshrinkage(neurontometa))
-    regionid = com.ingestregion(neurontometa)
+    meas_id = _time_stage(timings, 'pg_insert_summary_measurements', com.insert, 'measurements', neurontomeas)
+    shrinkval_id = _time_stage(timings, 'pg_insert_shrinkagevalue', com.insert, 'shrinkagevalue', getshrinkage(neurontometa))
+    regionid = _time_stage(timings, 'pg_ingestregion', com.ingestregion, neurontometa)
     #logging.info("neurontometa is {}".format(neurontometa))
-    celltypeid = com.ingestcelltype(neurontometa)
+    celltypeid = _time_stage(timings, 'pg_ingestcelltype', com.ingestcelltype, neurontometa)
     neurontometa['uploaddate'] = str(date.today())
     neurontometa['has_soma'] = 'Soma' in ndomains.keys()
     if representint(neurontometa['pmid']):
@@ -75,7 +105,7 @@ def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains):
         ],neurontometa)
     neurontometa = mapvals(neurontometa)
     neurontometa = mapshrinkage(neurontometa)
-    return com.ingestneuron(neurontometa)
+    return _time_stage(timings, 'pg_call_ingest_data', com.ingestneuron, neurontometa)
 
 def ingestdetailedmeas(neuron_name,neurontodetmeas):
     meas_ids = {}
@@ -167,41 +197,63 @@ def _sanitize_ingest_threads(threads):
 
 def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neurontodetmeas):
     neuron_name = neuron['neuron_name']
+    timings = {}
+    total_started = time.perf_counter()
     try:
-        if com.myneuronexists(neuron_name):
+        exists = _time_stage(timings, 'mysql_check_existing_neuron', com.myneuronexists, neuron_name)
+        if exists:
             com.updateneuronstatus(neuron_name, 'ingested', 'Neuron already exists in review DB')
+            timings['total'] = round(time.perf_counter() - total_started, 4)
+            logging.info("Ingest timing %s: %s", neuron_name, _format_stage_timings(timings))
             return neuron_name, {
                 'status': 'success',
                 'message': 'Neuron already exists in review DB',
                 'skipped': True,
+                'timings': timings,
             }
 
         thismeta = neurontometa[neuron_name].copy()
-        (ndomains,morpho_attr) = neurondomains(neuron_name,thismeta)
+        (ndomains,morpho_attr) = _time_stage(timings, 'read_swc_domains', neurondomains, neuron_name, thismeta)
 
-        neuron_id = ingestexecute(neuron_name,neurontomeas[neuron_name],thismeta,ndomains)
-        detmeas_ids = ingestdetailedmeas(neuron_name,neurontodetmeas)
+        neuron_id = _time_stage(timings, 'ingestexecute_total', ingestexecute, neuron_name, neurontomeas[neuron_name], thismeta, ndomains, timings)
+        detmeas_ids = _time_stage(timings, 'pg_insert_detailed_measurements', ingestdetailedmeas, neuron_name, neurontodetmeas)
         
-        com.ingestdomain(neuron_id,ndomains,morpho_attr,detmeas_ids)
-        io.importpvec(neuron_id,neuron_name,folder_name)
-        io.exportneuron(neuron_name)
+        _time_stage(timings, 'pg_insert_domains', com.ingestdomain, neuron_id, ndomains, morpho_attr, detmeas_ids)
+        _time_stage(timings, 'pg_import_pvec', io.importpvec, neuron_id, neuron_name, folder_name)
+        _time_stage(timings, 'export_review_mysql_tomcat', io.exportneuron, neuron_name)
+        timings['total'] = round(time.perf_counter() - total_started, 4)
+        logging.info("Ingest timing %s: %s", neuron_name, _format_stage_timings(timings))
         return neuron_name, {
             'status': 'success',
-            'message': 'Successful ingestion'
+            'message': 'Successful ingestion',
+            'timings': timings,
         }
     except Exception as e:
+        timings['total'] = round(time.perf_counter() - total_started, 4)
         com.setneuronerror(neuron_name,str(e))
+        logging.info("Ingest timing %s before error: %s", neuron_name, _format_stage_timings(timings))
         logging.exception("Error during ingestion of neuron: {}".format(neuron_name))
         return neuron_name, {
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'timings': timings,
         }
+
+
+def _neuron_progress_message(counter, total, neuron_name, neuron_result):
+    timing = _timing_summary(neuron_result.get('timings'))
+    timing_suffix = ' ({})'.format(timing) if timing else ''
+    if neuron_result.get('status') == 'error':
+        return 'Error {} / {}: {}{}'.format(counter, total, neuron_name, timing_suffix)
+    if neuron_result.get('skipped'):
+        return 'Skipped existing neuron {} / {}: {}{}'.format(counter, total, neuron_name, timing_suffix)
+    return 'Processed {} / {}: {}{}'.format(counter, total, neuron_name, timing_suffix)
 
 
 def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
     # select all neurons with status ready from an archive and ingest them
     threads = _sanitize_ingest_threads(threads)
-    com.clear_checkexists_cache()
+    com.clear_workflow_caches()
     r = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', '6379')),
@@ -238,18 +290,14 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
                 neurontomeas,
                 neurontodetmeas,
             )
-            result[neuron_name] = neuron_result
             counter += 1
             if nneurons:
                 r.set(folder_name,counter/nneurons)
             if progress_cb:
-                if neuron_result.get('status') == 'error':
-                    message = 'Error {} / {}: {}'.format(counter, nneurons, neuron_name)
-                elif neuron_result.get('skipped'):
-                    message = 'Skipped existing neuron {} / {}: {}'.format(counter, nneurons, neuron_name)
-                else:
-                    message = 'Processed {} / {}: {}'.format(counter, nneurons, neuron_name)
-                progress_cb(counter, nneurons, message)
+                progress_cb(counter, nneurons, _neuron_progress_message(counter, nneurons, neuron_name, neuron_result))
+            stored_result = dict(neuron_result)
+            stored_result.pop('timings', None)
+            result[neuron_name] = stored_result
         return result
 
     iterator = iter(targetneurons)
@@ -293,18 +341,14 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
                     }
                     com.setneuronerror(neuron_name,str(e))
                     logging.exception("Error during threaded ingestion of neuron: {}".format(neuron_name))
-                result[neuron_name] = neuron_result
                 counter += 1
                 if nneurons:
                     r.set(folder_name,counter/nneurons)
                 if progress_cb:
-                    if neuron_result.get('status') == 'error':
-                        message = 'Error {} / {}: {}'.format(counter, nneurons, neuron_name)
-                    elif neuron_result.get('skipped'):
-                        message = 'Skipped existing neuron {} / {}: {}'.format(counter, nneurons, neuron_name)
-                    else:
-                        message = 'Processed {} / {}: {}'.format(counter, nneurons, neuron_name)
-                    progress_cb(counter, nneurons, message)
+                    progress_cb(counter, nneurons, _neuron_progress_message(counter, nneurons, neuron_name, neuron_result))
+                stored_result = dict(neuron_result)
+                stored_result.pop('timings', None)
+                result[neuron_name] = stored_result
             while len(pending) < max_pending and submit_next(executor):
                 pass
 
