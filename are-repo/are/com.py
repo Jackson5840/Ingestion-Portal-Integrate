@@ -147,6 +147,26 @@ def myinsert_with_cursor(cur, tablename, data):
     return result[0]
 
 
+def pg_insert_with_cursor(cur, tablename, data):
+    data = {item: data[item] for item in data if data[item] is not None}
+    data = {item: data[item] for item in data if data[item] != 'NULL'}
+    fields = ",".join(data.keys())
+    if len(data) == 0:
+        statement = "INSERT INTO {}(id) VALUES(DEFAULT)".format(tablename)
+    else:
+        values = []
+        for item in data:
+            if isinstance(data[item], str):
+                values.append("'{}'".format(data[item].replace("'","''")))
+            else:
+                values.append(str(data[item]))
+        statement = """INSERT INTO {}({}) VALUES ({}) """.format(tablename, fields, ",".join(values))
+    cur.execute(statement)
+    cur.execute("SELECT currval(pg_get_serial_sequence('{}','id'))".format(tablename))
+    result = cur.fetchone()
+    return result[0]
+
+
 def _normalized_checkexists_fields(fields):
     normalized = {}
     for key, value in fields.items():
@@ -205,6 +225,10 @@ class WorkflowDBSession:
 
     def myinsert_with_cursor(self, cur, tablename, data):
         return myinsert_with_cursor(cur, tablename, data)
+
+    def pg_insert(self, tablename, data):
+        cur = self.pg_cursor()
+        return pg_insert_with_cursor(cur, tablename, data)
 
     def checkindb(self, table, indexfield, fields):
         fields = dict(fields)
@@ -580,6 +604,19 @@ def exportpvec_fast(session, neuron_id, oldid):
     session.myinsert("persistance_vector",newd)
 
 
+def exportpvec_from_row(session, pvec_row, oldid):
+    dpvec = dict(pvec_row)
+    dpvec.pop("id", None)
+    dpvec["Sfactor"] = dpvec.pop("sfactor")
+    dpvec["neuron_id"] = oldid
+    coeffs = dpvec.pop("coeffs")
+    if isinstance(coeffs, str):
+        coeffs = [item for item in coeffs.strip("{}").split(",") if item != ""]
+    dcoeffs = {"coeff{0:0=2d}".format(i): j for (i,j) in enumerate(coeffs)}
+    newd = {**dpvec,**dcoeffs}
+    session.myinsert("persistance_vector",newd)
+
+
 def insertbrainregions_fast(session, reglist, neuron_id):
     cur = session.mysql_cursor(buffered=True)
     level = 0
@@ -930,6 +967,29 @@ def exportmeasurements_fast(session, neuron_id, oldid, neuron_name):
         res2['neuron_id'] = oldid
         session.myinsert('measurements{}'.format(domain),res2)
     return [dict(item) for item in res]
+
+
+def _mysql_measurement_row(measurement_row, oldid, neuron_name):
+    result = {
+        item[0].upper() + item[1:]: measurement_row[item]
+        for item in measurement_row.keys()
+        if item not in ('domain', 'completeness', 'morph_attributes')
+    }
+    result.pop('Id', None)
+    result['Neuron_name'] = neuron_name
+    result['neuron_id'] = oldid
+    return result
+
+
+def exportmeasurements_from_ingest(session, summary_measurements, structure_rows, oldid, neuron_name):
+    session.myinsert('measurements', _mysql_measurement_row(summary_measurements, oldid, neuron_name))
+    for meas in structure_rows:
+        domain = meas['domain']
+        session.myinsert(
+            'measurements{}'.format(domain),
+            _mysql_measurement_row(meas, oldid, neuron_name),
+        )
+    return structure_rows
 
 @pgconnect
 def exportdetailedmeasurements(conn,neuron_id,oldid,neuron_name):
@@ -1398,6 +1458,26 @@ def myneuronexists(conn, neuron_name):
     cur.execute(stmt)
     return cur.fetchone() is not None
 
+
+@myconnect
+def get_existing_mysql_neuron_names(conn, neuron_names):
+    result = set()
+    names = list(dict.fromkeys(neuron_names))
+    if not names:
+        return result
+    cur = conn.cursor()
+    chunk_size = 1000
+    for offset in range(0, len(names), chunk_size):
+        chunk = names[offset:offset + chunk_size]
+        placeholders = ",".join(["%s"] * len(chunk))
+        cur.execute(
+            "SELECT neuron_name FROM neuron WHERE neuron_name IN ({})".format(placeholders),
+            tuple(chunk),
+        )
+        result.update(item[0] for item in cur.fetchall())
+    return result
+
+
 @pgconnect
 def updateneuronstatus(conn,neuron_name, status,message = ''):
     cur = conn.cursor()
@@ -1435,7 +1515,7 @@ def update(conn,tablename,whereq,updateq):
     cur.execute(statement)
     return cur.rowcount
 
-def ingestneuron(d):
+def ingestneuron(d, session=None):
     #inserts one neuron with values from dictionary d
     # TODO add parameters. 
     nonechecks= ['min_weight','max_weight']
@@ -1479,18 +1559,25 @@ def ingestneuron(d):
             d[item] = escapechars(d[item])
             d[item] = d[item].replace("'","''")
 
-    checkexists_cached('archive', 'archive_name', {'archive_name': d['archive']})
-    conn=connect()
-    cur = conn.cursor()
-    statement = """CALL ingest_data('{}', '{}', '{}',  '{}', '{}','{}' , '{}' , '{}','{}', '{}','{}','{}', '{}','{}', '{}', '{}', '{}', '{}', cast({} as boolean), '{}' , '{}' , '{}', {}, {},{},{}, '{}', '{}','{}', '{}', {},'{}','{}',  null)""".format(d['neuron_name'].replace("'","''"),d['archive'],d['URL_reference'],d['species'], expcondtext,d['age_classification'],d['region'],d['celltype'],d['deposition_date'],d['uploaddate'],
-     d['magnification'],d['objective'],d['format'],d['protocol'],d['slice_direction'],str(d['thickness']),d['stain'],d['strain'],
-     str(d['has_soma']),d['shrinkage_reported'],d['age_scale'],d['gender'],str(d['max_age']),str(d['min_age']),d['min_weight'],
-     d['max_weight'],notetext.replace("'","''"),str(d['pmid']),d['doi'],str(d['sum_mes_id']),str(d['shrinkval_id']),d['reconstruction'],d['URL_reference'])
-    cur.execute(statement)
-    result = cur.fetchone()
-    neuron_id = result[0]
-    conn.close()
-    return neuron_id
+    if session is not None:
+        session.checkexists_cached('archive', 'archive_name', {'archive_name': d['archive']})
+    else:
+        checkexists_cached('archive', 'archive_name', {'archive_name': d['archive']})
+    owns_conn = session is None
+    conn = connect() if owns_conn else session.pg_conn
+    try:
+        cur = conn.cursor()
+        statement = """CALL ingest_data('{}', '{}', '{}',  '{}', '{}','{}' , '{}' , '{}','{}', '{}','{}','{}', '{}','{}', '{}', '{}', '{}', '{}', cast({} as boolean), '{}' , '{}' , '{}', {}, {},{},{}, '{}', '{}','{}', '{}', {},'{}','{}',  null)""".format(d['neuron_name'].replace("'","''"),d['archive'],d['URL_reference'],d['species'], expcondtext,d['age_classification'],d['region'],d['celltype'],d['deposition_date'],d['uploaddate'],
+         d['magnification'],d['objective'],d['format'],d['protocol'],d['slice_direction'],str(d['thickness']),d['stain'],d['strain'],
+         str(d['has_soma']),d['shrinkage_reported'],d['age_scale'],d['gender'],str(d['max_age']),str(d['min_age']),d['min_weight'],
+         d['max_weight'],notetext.replace("'","''"),str(d['pmid']),d['doi'],str(d['sum_mes_id']),str(d['shrinkval_id']),d['reconstruction'],d['URL_reference'])
+        cur.execute(statement)
+        result = cur.fetchone()
+        neuron_id = result[0]
+        return neuron_id
+    finally:
+        if owns_conn:
+            conn.close()
 
 def getarticleid(pmid,doi, session=None):
     """ Gets the article id for insertion.
@@ -1532,6 +1619,35 @@ def getarticleid(pmid,doi, session=None):
                 result = (res[0],res[1])
                 _publication_cache[cache_key] = result
                 return result
+
+            if pmid > 0:
+                cur.execute(
+                    "SELECT article_id FROM reference_article WHERE article_URL = %s ORDER BY article_id DESC LIMIT 1",
+                    ("https://www.ncbi.nlm.nih.gov/pubmed/{}/".format(pmid),),
+                )
+                res = cur.fetchone()
+                if res is not None:
+                    result = (res[0], pmid)
+                    _publication_cache[cache_key] = result
+                    return result
+            elif not isref:
+                cur.execute(
+                    """
+                    SELECT reference_article.article_id, AllPublications.PMID
+                    FROM AllPublications
+                    JOIN reference_article
+                    ON reference_article.article_URL = CONCAT('https://www.ncbi.nlm.nih.gov/pubmed/', AllPublications.PMID, '/')
+                    WHERE AllPublications.DOI = %s
+                    ORDER BY reference_article.article_id DESC
+                    LIMIT 1
+                    """,
+                    (doi,),
+                )
+                res = cur.fetchone()
+                if res is not None:
+                    result = (res[0], res[1])
+                    _publication_cache[cache_key] = result
+                    return result
 
             if pmid > 0:
                 pmrecord = io.fetchpmarticle(str(pmid))
@@ -1833,14 +1949,19 @@ def getpvecmes(conn,neuron_id):
     
     
 
-@pgconnect
-def ingestdomain(conn,neuron_id,domains,morph_attr,detmeas_ids):
-    cur = conn.cursor()
-    if "Soma" in domains:
-        del domains["Soma"]
-    for key in domains:
-        stmt = "INSERT INTO neuron_structure (neuron_id, completeness, domain,morph_attributes,measurements_id) VALUES ({},'{}','{}',{},{})".format(neuron_id,domains[key],key,morph_attr,detmeas_ids[key])
-        cur.execute(stmt)
+def ingestdomain(neuron_id,domains,morph_attr,detmeas_ids, session=None):
+    owns_conn = session is None
+    conn = connect() if owns_conn else session.pg_conn
+    try:
+        cur = conn.cursor()
+        if "Soma" in domains:
+            del domains["Soma"]
+        for key in domains:
+            stmt = "INSERT INTO neuron_structure (neuron_id, completeness, domain,morph_attributes,measurements_id) VALUES ({},'{}','{}',{},{})".format(neuron_id,domains[key],key,morph_attr,detmeas_ids[key])
+            cur.execute(stmt)
+    finally:
+        if owns_conn:
+            conn.close()
 
 @myconnect
 def checkindb(conn,table,indexfield, fields):
@@ -1908,7 +2029,7 @@ def checkexists(conn,table,indexfield, fields):
                 raise
     return res[0]
 
-def ingestregion(adict):
+def ingestregion(adict, session=None):
     # Checks dict for region fields
     # Wraps fields into array string for postgres stored procedure
     proceed = True
@@ -1945,7 +2066,8 @@ def ingestregion(adict):
     with _pg_reference_lock:
         if cache_key in _pg_region_cache:
             return _pg_region_cache[cache_key]
-        conn=connect()
+        owns_conn = session is None
+        conn = connect() if owns_conn else session.pg_conn
         try:
             cur = conn.cursor()
             cur.execute("CALL ingest_region({},'{}')".format(pgarr,path)) #TODO check if paranthesis should be here
@@ -1954,14 +2076,15 @@ def ingestregion(adict):
             _pg_region_cache[cache_key] = theid[0]
             return theid[0]
         finally:
-            conn.close()
+            if owns_conn:
+                conn.close()
     # Strips invalid characters from path elements string.
     # Concatenates path elements into ltree path
     # Calls stored procedure to ingest region at lowest level if needed
     # Regions at level 3A,B, C are ingested at same level in tree by calling procedure for each 
 
 
-def ingestcelltype(adict):
+def ingestcelltype(adict, session=None):
     # Checks dict for celltype fields
     # Wraps fields into array string for postgres stored procedure
     proceed = True
@@ -2004,7 +2127,8 @@ def ingestcelltype(adict):
     with _pg_reference_lock:
         if cache_key in _pg_celltype_cache:
             return _pg_celltype_cache[cache_key]
-        conn=connect()
+        owns_conn = session is None
+        conn = connect() if owns_conn else session.pg_conn
         try:
             cur = conn.cursor()
             cur.execute("CALL ingest_celltype({},'{}')".format(pgarr,path))
@@ -2013,7 +2137,8 @@ def ingestcelltype(adict):
             _pg_celltype_cache[cache_key] = theid[0]
             return theid[0]
         finally:
-            conn.close()
+            if owns_conn:
+                conn.close()
 
 @pgconnect
 def getneuronfolder(conn,neuron_name):

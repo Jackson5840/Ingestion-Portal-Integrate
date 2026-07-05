@@ -6,7 +6,7 @@ from datetime import date,datetime
 from Bio import Entrez
 from pathlib import Path
 from crossref.restful import Works 
-from threading import Thread
+from threading import Thread, RLock
 from xml.etree import ElementTree as ET
 from urllib.request import urlopen
 from bs4 import BeautifulSoup
@@ -20,6 +20,15 @@ import redis
 islocal = True
 if not islocal:
     import paramiko
+
+_transfer_dir_cache = set()
+_transfer_dir_cache_lock = RLock()
+
+
+def clear_transfer_dir_cache():
+    with _transfer_dir_cache_lock:
+        _transfer_dir_cache.clear()
+
 
 #update main local only
 def updateinfo(foldername, version, dt_string):
@@ -1243,7 +1252,7 @@ def readpvecmes(foldername):
         datarows.append(pvecmes)
     return datarows
 
-def importpvec(neuron_id,neuron_name,archive):
+def importpvec(neuron_id,neuron_name,archive, session=None):
     pvecpath = os.path.join(cfg.datapath,archive,"pvec",neuron_name + ".CNG.pvec")
     with open(pvecpath) as pfile:
         line1 = pfile.readline().split()
@@ -1254,7 +1263,17 @@ def importpvec(neuron_id,neuron_name,archive):
         "sfactor": line1[1],
         "coeffs": "{{{}}}".format(",".join(line2))
     }
-    com.insert("pvec",dpvec)
+    if session is not None:
+        pvec_id = session.pg_insert("pvec",dpvec)
+    else:
+        pvec_id = com.insert("pvec",dpvec)
+    return {
+        "id": pvec_id,
+        "neuron_id": neuron_id,
+        "distance": line1[0],
+        "sfactor": line1[1],
+        "coeffs": line2,
+    }
 
 
 def getarchivecsv():
@@ -1907,7 +1926,7 @@ def publishtweets(version,nneurons,archivename,neuron_name,folders):
     #     api.create_tweet(text=message,)
 
 
-def exportneuron(neuron_name, folder_name=None):
+def exportneuron(neuron_name, folder_name=None, ingest_export_data=None):
 
     session = com.get_workflow_session()
     item = com.getneurondata_fast(neuron_name, session=session)
@@ -1915,7 +1934,16 @@ def exportneuron(neuron_name, folder_name=None):
     oldid = session.myinsert('neuron',myitem)
     com.insertbrainregions_fast(session, item["regionlabels"],oldid)
     com.insertcelltypes_fast(session, item['celltypelabels'],oldid)
-    structure_rows = com.exportmeasurements_fast(session, item['id'],oldid,item['name'])
+    if ingest_export_data and ingest_export_data.get('summary_measurements') and ingest_export_data.get('structure_rows'):
+        structure_rows = com.exportmeasurements_from_ingest(
+            session,
+            ingest_export_data['summary_measurements'],
+            ingest_export_data['structure_rows'],
+            oldid,
+            item['name'],
+        )
+    else:
+        structure_rows = com.exportmeasurements_fast(session, item['id'],oldid,item['name'])
     #com.exportdetailedmeasurements(item['id'],oldid,item['name'])
     com.insertdeposition_fast(session, oldid,item)
     com.insertcompleteness_fast(session, structure_rows,oldid,item)
@@ -1926,7 +1954,10 @@ def exportneuron(neuron_name, folder_name=None):
         'type': 'swc'
     })
     com.exportpublication_fast(session, oldid,item)
-    com.exportpvec_fast(session, item["id"],oldid)
+    if ingest_export_data and ingest_export_data.get('pvec'):
+        com.exportpvec_from_row(session, ingest_export_data['pvec'], oldid)
+    else:
+        com.exportpvec_fast(session, item["id"],oldid)
     if cfg.sshdir == cfg.sshreviewdir:
         transferneuronfiles(neuron_name, foldername=folder_name, archive=item['archive_name'])
     status = 'success'
@@ -1969,13 +2000,18 @@ def checkduplicates(neuron_id):
 def transferneuronfiles(neuron_name, foldername=None, archive=None):
     def checkdir(path):
         # Check if a directory exists, if not create it either local or remote
-        if islocal:
-            os.makedirs(path, exist_ok=True)
-        else:
-            try:
-                sftp.chdir(path)
-            except IOError as e:
-                sftp.mkdir(path)
+        cache_key = (cfg.sshdir, path)
+        with _transfer_dir_cache_lock:
+            if cache_key in _transfer_dir_cache:
+                return
+            if islocal:
+                os.makedirs(path, exist_ok=True)
+            else:
+                try:
+                    sftp.chdir(path)
+                except IOError as e:
+                    sftp.mkdir(path)
+            _transfer_dir_cache.add(cache_key)
     if foldername is None:
         foldername = com.getneuronfolder(neuron_name)
     if archive is None:

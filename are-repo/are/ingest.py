@@ -67,7 +67,7 @@ def _format_stage_timings(timings):
     )
 
 
-def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains,timings=None):
+def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains,timings=None, session=None, return_rows=False):
     # takes one neuron as parameter
     # reads metadata as provided by csv and folder mapping to a dictionary
     # read measurements
@@ -76,12 +76,15 @@ def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains,timings=None):
     # rund ingest neuron
     # copy neuron files to the right place
     # neurontodetmeas dicitionary mapping domain to measurements dictionary 
+    pg_insert = session.pg_insert if session is not None else com.insert
     neurontomeas =  changenotrep(neurontomeas.keys(),neurontomeas)
-    meas_id = _time_stage(timings, 'pg_insert_summary_measurements', com.insert, 'measurements', neurontomeas)
-    shrinkval_id = _time_stage(timings, 'pg_insert_shrinkagevalue', com.insert, 'shrinkagevalue', getshrinkage(neurontometa))
-    regionid = _time_stage(timings, 'pg_ingestregion', com.ingestregion, neurontometa)
+    meas_id = _time_stage(timings, 'pg_insert_summary_measurements', pg_insert, 'measurements', neurontomeas)
+    summary_measurements = dict(neurontomeas)
+    summary_measurements['id'] = meas_id
+    shrinkval_id = _time_stage(timings, 'pg_insert_shrinkagevalue', pg_insert, 'shrinkagevalue', getshrinkage(neurontometa))
+    regionid = _time_stage(timings, 'pg_ingestregion', com.ingestregion, neurontometa, session=session)
     #logging.info("neurontometa is {}".format(neurontometa))
-    celltypeid = _time_stage(timings, 'pg_ingestcelltype', com.ingestcelltype, neurontometa)
+    celltypeid = _time_stage(timings, 'pg_ingestcelltype', com.ingestcelltype, neurontometa, session=session)
     neurontometa['uploaddate'] = str(date.today())
     neurontometa['has_soma'] = 'Soma' in ndomains.keys()
     if representint(neurontometa['pmid']):
@@ -105,31 +108,70 @@ def ingestexecute(neuron_name,neurontomeas,neurontometa,ndomains,timings=None):
         ],neurontometa)
     neurontometa = mapvals(neurontometa)
     neurontometa = mapshrinkage(neurontometa)
-    return _time_stage(timings, 'pg_call_ingest_data', com.ingestneuron, neurontometa)
+    neuron_id = _time_stage(timings, 'pg_call_ingest_data', com.ingestneuron, neurontometa, session=session)
+    if return_rows:
+        return neuron_id, summary_measurements
+    return neuron_id
 
-def ingestdetailedmeas(neuron_name,neurontodetmeas):
+def ingestdetailedmeas(neuron_name,neurontodetmeas, session=None, return_rows=False):
+    pg_insert = session.pg_insert if session is not None else com.insert
     meas_ids = {}
+    meas_rows = {}
     for item in neurontodetmeas:
         thismeas = neurontodetmeas[item][neuron_name]
         changenotrep(thismeas.keys(),thismeas)
-        meas_ids[item] = com.insert('measurements',thismeas)
+        meas_ids[item] = pg_insert('measurements',thismeas)
+        meas_rows[item] = dict(thismeas)
+        meas_rows[item]['id'] = meas_ids[item]
+    if return_rows:
+        return meas_ids, meas_rows
     return meas_ids
+
+
+def _structure_rows_from_ingest(domains, morpho_attr, detmeas_rows):
+    rows = []
+    for domain, completeness in domains.items():
+        if domain == 'Soma':
+            continue
+        row = dict(detmeas_rows[domain])
+        row['domain'] = domain
+        row['completeness'] = completeness
+        row['morph_attributes'] = morpho_attr
+        rows.append(row)
+    return rows
     
     
     
 def ingestneuron(neuron_name):
+    session = com.get_workflow_session()
     try:
         folder_name = com.getneuronfolder(neuron_name)
         #archive_name = io.namefromfolder(folder_name)
         neurontometa = mapneurontometa(folder_name)
         (neurontomeas,neurontodetmeas) = mapneurontomeasurements(folder_name)
-        (ndomains,morpho_attr) = neurondomains(neuron_name,neurontometa[neuron_name])
-        neuron_id = ingestexecute(neuron_name,neurontomeas[neuron_name],neurontometa[neuron_name],ndomains)
-        detmeas_ids = ingestdetailedmeas(neuron_name,neurontodetmeas)
-        
-        com.ingestdomain(neuron_id,ndomains,morpho_attr,detmeas_ids)
-        io.importpvec(neuron_id,neuron_name,folder_name)
-        io.exportneuron(neuron_name)
+        (ndomains,morpho_attr) = neurondomains(neuron_name,neurontometa[neuron_name], folder_name=folder_name)
+        neuron_id, summary_measurements = ingestexecute(
+            neuron_name,
+            neurontomeas[neuron_name],
+            neurontometa[neuron_name],
+            ndomains,
+            session=session,
+            return_rows=True,
+        )
+        detmeas_ids, detmeas_rows = ingestdetailedmeas(
+            neuron_name,
+            neurontodetmeas,
+            session=session,
+            return_rows=True,
+        )
+        domain_map = dict(ndomains)
+        com.ingestdomain(neuron_id,domain_map,morpho_attr,detmeas_ids, session=session)
+        pvec_row = io.importpvec(neuron_id,neuron_name,folder_name, session=session)
+        io.exportneuron(neuron_name, folder_name, {
+            'summary_measurements': summary_measurements,
+            'structure_rows': _structure_rows_from_ingest(domain_map, morpho_attr, detmeas_rows),
+            'pvec': pvec_row,
+        })
         result= {
             'status': 'success',
             'message': 'Successful ingestion'
@@ -141,6 +183,8 @@ def ingestneuron(neuron_name):
         }
         com.setneuronerror(neuron_name,str(e))
         logging.exception("Error during ingestion of neuron: {}".format(neuron_name))
+    finally:
+        com.close_workflow_sessions()
     return result
     
 
@@ -195,14 +239,20 @@ def _sanitize_ingest_threads(threads):
     return 1
 
 
-def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neurontodetmeas):
+def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neurontodetmeas, existing_review_neurons=None):
     neuron_name = neuron['neuron_name']
     timings = {}
     total_started = time.perf_counter()
+    session = None
     try:
-        exists = _time_stage(timings, 'mysql_check_existing_neuron', com.myneuronexists, neuron_name)
+        session = com.get_workflow_session()
+        if existing_review_neurons is None:
+            exists = _time_stage(timings, 'mysql_check_existing_neuron', com.myneuronexists, neuron_name)
+        else:
+            exists = neuron_name in existing_review_neurons
+            timings['mysql_check_existing_neuron'] = 0.0
         if exists:
-            com.updateneuronstatus(neuron_name, 'ingested', 'Neuron already exists in review DB')
+            com.updateneuronstatus_fast(session, neuron_name, 'ingested', 'Neuron already exists in review DB')
             timings['total'] = round(time.perf_counter() - total_started, 4)
             logging.info("Ingest timing %s: %s", neuron_name, _format_stage_timings(timings))
             return neuron_name, {
@@ -213,14 +263,39 @@ def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neur
             }
 
         thismeta = neurontometa[neuron_name].copy()
-        (ndomains,morpho_attr) = _time_stage(timings, 'read_swc_domains', neurondomains, neuron_name, thismeta)
+        (ndomains,morpho_attr) = _time_stage(timings, 'read_swc_domains', neurondomains, neuron_name, thismeta, folder_name=folder_name)
 
-        neuron_id = _time_stage(timings, 'ingestexecute_total', ingestexecute, neuron_name, neurontomeas[neuron_name], thismeta, ndomains, timings)
-        detmeas_ids = _time_stage(timings, 'pg_insert_detailed_measurements', ingestdetailedmeas, neuron_name, neurontodetmeas)
+        neuron_id, summary_measurements = _time_stage(
+            timings,
+            'ingestexecute_total',
+            ingestexecute,
+            neuron_name,
+            neurontomeas[neuron_name],
+            thismeta,
+            ndomains,
+            timings,
+            session=session,
+            return_rows=True,
+        )
+        detmeas_ids, detmeas_rows = _time_stage(
+            timings,
+            'pg_insert_detailed_measurements',
+            ingestdetailedmeas,
+            neuron_name,
+            neurontodetmeas,
+            session=session,
+            return_rows=True,
+        )
         
-        _time_stage(timings, 'pg_insert_domains', com.ingestdomain, neuron_id, ndomains, morpho_attr, detmeas_ids)
-        _time_stage(timings, 'pg_import_pvec', io.importpvec, neuron_id, neuron_name, folder_name)
-        _time_stage(timings, 'export_review_mysql_tomcat', io.exportneuron, neuron_name, folder_name)
+        domain_map = dict(ndomains)
+        _time_stage(timings, 'pg_insert_domains', com.ingestdomain, neuron_id, domain_map, morpho_attr, detmeas_ids, session=session)
+        pvec_row = _time_stage(timings, 'pg_import_pvec', io.importpvec, neuron_id, neuron_name, folder_name, session=session)
+        ingest_export_data = {
+            'summary_measurements': summary_measurements,
+            'structure_rows': _structure_rows_from_ingest(domain_map, morpho_attr, detmeas_rows),
+            'pvec': pvec_row,
+        }
+        _time_stage(timings, 'export_review_mysql_tomcat', io.exportneuron, neuron_name, folder_name, ingest_export_data)
         timings['total'] = round(time.perf_counter() - total_started, 4)
         logging.info("Ingest timing %s: %s", neuron_name, _format_stage_timings(timings))
         return neuron_name, {
@@ -255,6 +330,7 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
     threads = _sanitize_ingest_threads(threads)
     com.close_workflow_sessions()
     com.clear_workflow_caches()
+    io.clear_transfer_dir_cache()
     r = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
         port=int(os.getenv('REDIS_PORT', '6379')),
@@ -271,9 +347,18 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
     targetneurons = [item for item in readyneurons if item['status'] in ('warning','read','error')]
     targetneurons.sort(key=lambda item: item['neuron_name'])
     nneurons = len(targetneurons)
+    existing_review_neurons = com.get_existing_mysql_neuron_names(item['neuron_name'] for item in targetneurons)
     result = {}
     if progress_cb:
-        progress_cb(0, nneurons, 'Loaded {} neuron(s) to ingest with {} thread(s)'.format(nneurons, threads))
+        progress_cb(
+            0,
+            nneurons,
+            'Loaded {} neuron(s) to ingest with {} thread(s); preloaded {} existing review neuron(s)'.format(
+                nneurons,
+                threads,
+                len(existing_review_neurons),
+            ),
+        )
 
     if threads <= 1:
         for neuron in targetneurons:
@@ -290,6 +375,7 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
                 neurontometa,
                 neurontomeas,
                 neurontodetmeas,
+                existing_review_neurons,
             )
             counter += 1
             if nneurons:
@@ -319,6 +405,7 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
             neurontometa,
             neurontomeas,
             neurontodetmeas,
+            existing_review_neurons,
         )
         pending[future] = neuron['neuron_name']
         if progress_cb:
@@ -490,11 +577,12 @@ def mapneurontodetailedmeasurements(archive_name):
 
     return neuronstomeas
 
-def neurondomains(neuron_name,neuronmeta):
+def neurondomains(neuron_name,neuronmeta, folder_name=None):
     integrity = neuronmeta['Physical integrity']
     
     #reads swc file and finds neuron domains and if it has soma or not
-    folder_name = com.getneuronfolder(neuron_name)
+    if folder_name is None:
+        folder_name = com.getneuronfolder(neuron_name)
     filename = os.path.join(cfg.datapath, folder_name,'CNG Version',neuron_name + '.CNG.swc')
     minrad = 10000
     maxrad = -10000
