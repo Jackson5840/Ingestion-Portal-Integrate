@@ -46,8 +46,12 @@ review_webapp_root = os.getenv(
     'ARE_SSH_REVIEW_DIR',
     os.path.join(data_root, 'apache-tomcat-9.0.118', 'webapps', 'neuroMorphoReview')
 )
+main_webapp_root = os.getenv(
+    'ARE_SSH_MAIN_DIR',
+    os.path.join(data_root, 'apache-tomcat-9.0.118', 'webapps', 'neuroMorpho')
+)
 sshdir = review_webapp_root.rstrip('/') + '/'
-sshmaindir = os.path.join(data_root, 'tomcat', 'neuroMorpho') + '/'
+sshmaindir = main_webapp_root.rstrip('/') + '/'
 sshreviewdir = review_webapp_root.rstrip('/') + '/'
 
 

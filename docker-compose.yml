@@ -48,6 +48,7 @@ services:
       ARE_ARCHIVE_EXPORT_ROOT: "${NMO_ARCHIVE_EXPORT_ROOT:-/home/kira/app/Ingestion/dataexport}"
       ARE_MAJOR_RELEASE_STATISTICS_JSP: "${NMO_MAJOR_RELEASE_ROOT:-/home/kira/app/Ingestion/MajorRelease}/statistics.jsp"
       ARE_DATA_ROOT: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}"
+      ARE_SSH_MAIN_DIR: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}/apache-tomcat-9.0.118/webapps/neuroMorpho/"
       ARE_REMOTEPATH: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}/NMOV8.0-ongoing/"
       ARE_READY_REMOTEPATH: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}"
       ARE_REMOTE_METAPATH: "${NMO_DATA_ROOT:-/home/kira/app/Ingestion/data}/NMOV8.7-metadata/"

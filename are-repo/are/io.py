@@ -1548,7 +1548,7 @@ def genwinjsp(foldername,ingestdate=""):
 <ul>
 """.format(version['major'],version['minor'],version['patch'])]
         winlines.append('    <li>{} reconstruction{} (<a target="_blank" href="NeuroMorpho_ArchiveLinkout.jsp?ARCHIVE={}&DATE={}">{} archive</a>)</li>'.format(nneurons,plural,archive,ingestdate,archive))
-        winlines.append("</ul>")
+        winlines.append("</ul>\n")
 
         restoffile = sfile.readlines()
         towrite = winlines + restoffile
@@ -1657,24 +1657,21 @@ def remove_archive_from_win(archive):
     i = 0
     while i < len(lines):
         line = lines[i]
-        if 'ARCHIVE={}'.format(archive) in line or '{} archive'.format(archive) in line:
-            start = i
-            while start > 0 and lines[start].strip() != '<ul>':
-                start -= 1
-            if start > 0 and "What's new in version" in lines[start - 1]:
-                start -= 1
-                while start > 0 and lines[start - 1].strip() == '':
-                    start -= 1
-
+        if "What's new in version" in line:
+            block = []
+            while filtered and filtered[-1].strip() == '':
+                block.insert(0, filtered.pop())
             end = i
-            while end < len(lines) and '</ul>' not in lines[end]:
+            while end < len(lines):
+                block.append(lines[end])
+                if '</ul>' in lines[end]:
+                    end += 1
+                    break
                 end += 1
-            if end < len(lines):
-                end += 1
-
+            block_text = ''.join(block)
+            if 'ARCHIVE={}'.format(archive) not in block_text and '{} archive'.format(archive) not in block_text:
+                filtered.extend(block)
             i = end
-            while i < len(lines) and lines[i].strip() == '':
-                i += 1
             continue
 
         filtered.append(line)
