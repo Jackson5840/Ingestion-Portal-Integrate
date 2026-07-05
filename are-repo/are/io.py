@@ -1490,7 +1490,7 @@ def writeendings(foldername):
             if linetofind in line:
                 
                 endtofind = "archive"
-                namere = "\s*\<neuronname\>([^\<]*)"
+                namere = r"\s*\<neuronname\>([^\<]*)"
                 line1 = sfile.readline()
                 line2 = sfile.readline()
                 neuron_names = []
@@ -1968,8 +1968,7 @@ def transferneuronfiles(neuron_name):
     def checkdir(path):
         # Check if a directory exists, if not create it either local or remote
         if islocal:
-            if not os.path.exists(path):
-                os.makedirs(path)
+            os.makedirs(path, exist_ok=True)
         else:
             try:
                 sftp.chdir(path)

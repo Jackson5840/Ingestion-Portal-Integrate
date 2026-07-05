@@ -6,6 +6,7 @@ from . import com
 from datetime import date 
 import math, redis
 from . import io
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 
 logging.basicConfig(level=logging.INFO,filename='app.log', filemode='w', format='%(asctime)s %(name)-12s %(levelname)-8s %(message)s')
@@ -150,8 +151,56 @@ def getshrinkage(d):
     return shrinkd
 
 
-def ingestarchive(folder_name, progress_cb=None, should_stop=None):
+def _sanitize_ingest_threads(threads):
+    try:
+        threads = int(threads)
+    except (TypeError, ValueError):
+        return 1
+    if threads >= 8:
+        return 8
+    if threads >= 4:
+        return 4
+    if threads >= 2:
+        return 2
+    return 1
+
+
+def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neurontodetmeas):
+    neuron_name = neuron['neuron_name']
+    try:
+        if com.myneuronexists(neuron_name):
+            com.updateneuronstatus(neuron_name, 'ingested', 'Neuron already exists in review DB')
+            return neuron_name, {
+                'status': 'success',
+                'message': 'Neuron already exists in review DB',
+                'skipped': True,
+            }
+
+        thismeta = neurontometa[neuron_name].copy()
+        (ndomains,morpho_attr) = neurondomains(neuron_name,thismeta)
+
+        neuron_id = ingestexecute(neuron_name,neurontomeas[neuron_name],thismeta,ndomains)
+        detmeas_ids = ingestdetailedmeas(neuron_name,neurontodetmeas)
+        
+        com.ingestdomain(neuron_id,ndomains,morpho_attr,detmeas_ids)
+        io.importpvec(neuron_id,neuron_name,folder_name)
+        io.exportneuron(neuron_name)
+        return neuron_name, {
+            'status': 'success',
+            'message': 'Successful ingestion'
+        }
+    except Exception as e:
+        com.setneuronerror(neuron_name,str(e))
+        logging.exception("Error during ingestion of neuron: {}".format(neuron_name))
+        return neuron_name, {
+            'status': 'error',
+            'message': str(e)
+        }
+
+
+def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
     # select all neurons with status ready from an archive and ingest them
+    threads = _sanitize_ingest_threads(threads)
     com.clear_checkexists_cache()
     r = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),
@@ -167,61 +216,100 @@ def ingestarchive(folder_name, progress_cb=None, should_stop=None):
     readyneurons = com.getfolderneuronstatus(archive_name) # TODO check if correct
     counter =  0
     targetneurons = [item for item in readyneurons if item['status'] in ('warning','read','error')]
+    targetneurons.sort(key=lambda item: item['neuron_name'])
     nneurons = len(targetneurons)
     result = {}
     if progress_cb:
-        progress_cb(0, nneurons, 'Loaded {} neuron(s) to ingest'.format(nneurons))
-    for neuron in targetneurons:
-        if should_stop and should_stop():
-            if progress_cb:
-                progress_cb(counter, nneurons, 'Stop requested. Ingest paused after current neuron.', 'stopped')
-            break
-        try:
+        progress_cb(0, nneurons, 'Loaded {} neuron(s) to ingest with {} thread(s)'.format(nneurons, threads))
+
+    if threads <= 1:
+        for neuron in targetneurons:
+            if should_stop and should_stop():
+                if progress_cb:
+                    progress_cb(counter, nneurons, 'Stop requested. Ingest paused after current neuron.', 'stopped')
+                break
             neuron_name = neuron['neuron_name']
             if progress_cb:
                 progress_cb(counter, nneurons, 'Ingesting {}'.format(neuron_name))
-            if com.myneuronexists(neuron_name):
-                com.updateneuronstatus(neuron_name, 'ingested', 'Neuron already exists in review DB')
-                result[neuron_name] = {
-                    'status': 'success',
-                    'message': 'Neuron already exists in review DB'
-                }
+            neuron_name, neuron_result = _ingest_archive_neuron(
+                folder_name,
+                neuron,
+                neurontometa,
+                neurontomeas,
+                neurontodetmeas,
+            )
+            result[neuron_name] = neuron_result
+            counter += 1
+            if nneurons:
+                r.set(folder_name,counter/nneurons)
+            if progress_cb:
+                if neuron_result.get('status') == 'error':
+                    message = 'Error {} / {}: {}'.format(counter, nneurons, neuron_name)
+                elif neuron_result.get('skipped'):
+                    message = 'Skipped existing neuron {} / {}: {}'.format(counter, nneurons, neuron_name)
+                else:
+                    message = 'Processed {} / {}: {}'.format(counter, nneurons, neuron_name)
+                progress_cb(counter, nneurons, message)
+        return result
+
+    iterator = iter(targetneurons)
+    pending = {}
+    max_pending = max(threads * 2, threads)
+
+    def submit_next(executor):
+        if should_stop and should_stop():
+            return False
+        try:
+            neuron = next(iterator)
+        except StopIteration:
+            return False
+        future = executor.submit(
+            _ingest_archive_neuron,
+            folder_name,
+            neuron,
+            neurontometa,
+            neurontomeas,
+            neurontodetmeas,
+        )
+        pending[future] = neuron['neuron_name']
+        if progress_cb:
+            progress_cb(counter, nneurons, 'Queued {}'.format(neuron['neuron_name']))
+        return True
+
+    with ThreadPoolExecutor(max_workers=threads) as executor:
+        while len(pending) < max_pending and submit_next(executor):
+            pass
+        while pending:
+            done, _ = wait(pending, return_when=FIRST_COMPLETED)
+            for future in done:
+                queued_name = pending.pop(future)
+                try:
+                    neuron_name, neuron_result = future.result()
+                except Exception as e:
+                    neuron_name = queued_name
+                    neuron_result = {
+                        'status': 'error',
+                        'message': str(e)
+                    }
+                    com.setneuronerror(neuron_name,str(e))
+                    logging.exception("Error during threaded ingestion of neuron: {}".format(neuron_name))
+                result[neuron_name] = neuron_result
                 counter += 1
                 if nneurons:
                     r.set(folder_name,counter/nneurons)
                 if progress_cb:
-                    progress_cb(counter, nneurons, 'Skipped existing neuron {} / {}: {}'.format(counter, nneurons, neuron_name))
-                continue
-            #logging.info("neuron_name is {}".format(neuron_name))
-            thismeta = neurontometa[neuron_name].copy()
-            #logging.info("thismeta is {}".format(thismeta))
-            (ndomains,morpho_attr) = neurondomains(neuron_name,thismeta)
+                    if neuron_result.get('status') == 'error':
+                        message = 'Error {} / {}: {}'.format(counter, nneurons, neuron_name)
+                    elif neuron_result.get('skipped'):
+                        message = 'Skipped existing neuron {} / {}: {}'.format(counter, nneurons, neuron_name)
+                    else:
+                        message = 'Processed {} / {}: {}'.format(counter, nneurons, neuron_name)
+                    progress_cb(counter, nneurons, message)
+            while len(pending) < max_pending and submit_next(executor):
+                pass
 
-            neuron_id = ingestexecute(neuron_name,neurontomeas[neuron_name],thismeta,ndomains)
-            detmeas_ids = ingestdetailedmeas(neuron_name,neurontodetmeas)
-            
-            com.ingestdomain(neuron_id,ndomains,morpho_attr,detmeas_ids)
-            io.importpvec(neuron_id,neuron_name,folder_name)
-            io.exportneuron(neuron_name)
-            result[neuron_name] = {
-                'status': 'success',
-                'message': 'Successful ingestion'
-            }
-        except Exception as e:
-            result[neuron_name] = {
-                'status': 'error',
-                'message': str(e)
-            }
-            com.setneuronerror(neuron_name,str(e))
-            logging.exception("Error during ingestion of neuron: {}".format(neuron_name))
-        counter += 1
-        if nneurons:
-            r.set(folder_name,counter/nneurons)
-        if progress_cb:
-            progress_cb(counter, nneurons, 'Processed {} / {}'.format(counter, nneurons))
-        #except Exception as e:
-        #    result['status'] = 'error'
-        #    com.setneuronerror(item,str(e))
+    if should_stop and should_stop() and counter < nneurons and progress_cb:
+        progress_cb(counter, nneurons, 'Stop requested. Ingest paused after current neuron batch.', 'stopped')
      
     return result
     

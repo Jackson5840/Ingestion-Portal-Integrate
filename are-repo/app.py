@@ -118,18 +118,33 @@ def _release_archive_workflow_lock(job_type, archive):
         r.delete('archive_workflow_lock')
 
 
-def _run_ingest_archive_job(folder_name):
+def _parse_ingest_threads(value):
+    try:
+        threads = int(value)
+    except (TypeError, ValueError):
+        return 1
+    if threads >= 8:
+        return 8
+    if threads >= 4:
+        return 4
+    if threads >= 2:
+        return 2
+    return 1
+
+
+def _run_ingest_archive_job(folder_name, threads=1):
     job_type = 'ingest'
     def progress_cb(current, total, message, status='running'):
         _set_archive_job(job_type, folder_name, current=current, total=total, message=message, status=status)
 
     try:
         cfg.sshdir = cfg.sshreviewdir
-        progress_cb(0, 0, 'Starting ingest for {}'.format(folder_name))
+        progress_cb(0, 0, 'Starting ingest for {} with {} thread(s)'.format(folder_name, threads))
         neuron_results = ingest.ingestarchive(
             folder_name,
             progress_cb=progress_cb,
             should_stop=lambda: _archive_job_should_stop(job_type, folder_name),
+            threads=threads,
         )
         errors = [item for item in neuron_results if neuron_results[item].get('status') == 'error']
         current_state = _get_archive_job(job_type, folder_name)
@@ -1218,14 +1233,16 @@ def ingestneuron(neuron_name):
 def ingestarchive(folder_name):
     if _archive_job_is_running('ingest', folder_name):
         return {'status': 'running', 'job_id': folder_name}
+    threads = _parse_ingest_threads(request.args.get('threads'))
     locked, owner = _claim_archive_workflow_lock('ingest', folder_name)
     if not locked:
         return {'status': 'error', 'message': 'Another archive workflow is running: {}'.format(owner)}
-    _prepare_archive_job('ingest', folder_name, 'Starting ingest for {}'.format(folder_name))
-    t = Thread(target=_run_ingest_archive_job, args=(folder_name,))
+    _prepare_archive_job('ingest', folder_name, 'Starting ingest for {} with {} thread(s)'.format(folder_name, threads))
+    r.set(_job_key('ingest', folder_name, 'threads'), threads)
+    t = Thread(target=_run_ingest_archive_job, args=(folder_name, threads))
     t.daemon = True
     t.start()
-    return {'status': 'started', 'job_id': folder_name}
+    return {'status': 'started', 'job_id': folder_name, 'threads': threads}
 
 
 @app.route('/checkingestarchive/<string:folder_name>', methods=['GET'])

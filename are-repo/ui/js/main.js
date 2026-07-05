@@ -897,6 +897,10 @@ function updateArchiveJobProgress(archive_name, job, result) {
             toggleButton.style.display = logItems.length ? 'inline-block' : 'none';
         }
     }
+    var threadSelect = document.getElementById(archive_name + '_' + job + '_threads');
+    if (threadSelect && job === 'ingest' && !['running', 'stopping'].includes(status)) {
+        threadSelect.disabled = false;
+    }
 }
 
 function toggleArchiveJobLog(archive_name, job) {
@@ -960,23 +964,39 @@ function pollArchiveJob(archive_name, job, buttonId, successText, stoppedText, e
 }
 
 function ingestallneurons(archive_name) {
+    var threadsElem = document.getElementById(archive_name + '_ingest_threads');
+    var threads = threadsElem ? threadsElem.value : '1';
+    if (threadsElem) {
+        threadsElem.disabled = true;
+    }
     $('#' + archive_name + '_ibutton').prop('disabled', true)
     $('#' + archive_name + '_ibutton').html(
         `<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Ingesting archive...`
     );
     $.ajax({
-		url: serverbase + 'ingestarchive/' + archive_name,
-		error: function () {
-			console.log("Error!");
-		},
-			success: function (result) {
-	            console.log(result)
+			url: serverbase + 'ingestarchive/' + archive_name + '?threads=' + encodeURIComponent(threads),
+			error: function () {
+				console.log("Error!");
+                $('#' + archive_name + '_ibutton').prop('disabled', false);
+                $('#' + archive_name + '_ibutton').html(`Ingestion failed`);
+                if (threadsElem) {
+                    threadsElem.disabled = false;
+                }
+			},
+				success: function (result) {
+		            console.log(result)
 	            if (['started', 'running'].includes(result['status'])) {
                     pollArchiveJob(archive_name, 'ingest', archive_name + '_ibutton', 'Ingested successfully to review', 'Ingest stopped', 'Ingestion failed');
 	            } else if (result['status'] == 'success') {
+                    if (threadsElem) {
+                        threadsElem.disabled = false;
+                    }
 	                $('#' + archive_name + '_ibutton').html(`Ingested successfully to review`);
 	            } else {
                     $('#' + archive_name + '_ibutton').prop('disabled', false)
+                    if (threadsElem) {
+                        threadsElem.disabled = false;
+                    }
 	                $('#' + archive_name + '_ibutton').html(`Ingestion failed`);
 	            }
 	            
@@ -1198,6 +1218,17 @@ function createDataPanel(archives){
         </div>
         </div></td>
         
+        <td>
+            <div class="input-group input-group-sm" style="min-width:118px;">
+                <div class="input-group-prepend"><span class="input-group-text">Threads</span></div>
+                <select id="${archive.name}_ingest_threads" class="custom-select custom-select-sm" ${idisabled}>
+                    <option value="1" selected>1</option>
+                    <option value="2">2</option>
+                    <option value="4">4</option>
+                    <option value="8">8</option>
+                </select>
+            </div>
+        </td>
         <td><button id="${archive.name}_ibutton" ${idisabled} class="btn btn-primary btn-sm" type="button" style="float:right" onclick="ingestallneurons('${archive.name}',dm)">Ingest Archive</button></td>
         <td><button id="${archive.name}_wbutton" class="btn btn-primary btn-sm" type="button" style="float:right" onclick="genwinjsp('${archive.name}')">Publish WIN.jsp</button></td>
         <td><button id="${archive.name}_mbutton" class="btn btn-primary btn-sm" type="button" style="float:right" onclick="exporttomain('${archive.name}')">Export to main</button></td>

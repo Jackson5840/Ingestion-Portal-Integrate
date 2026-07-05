@@ -6,12 +6,38 @@ from . import io
 from datetime import datetime
 import json,validators
 import logging
+import threading
+import time
 
 _checkexists_cache = {}
+_checkexists_lock = threading.RLock()
+_pg_reference_lock = threading.RLock()
+_publication_lock = threading.RLock()
+_TRANSIENT_MYSQL_ERRORS = {1205, 1213}
 
 
 def clear_checkexists_cache():
-    _checkexists_cache.clear()
+    with _checkexists_lock:
+        _checkexists_cache.clear()
+
+
+def _is_duplicate_error(exc):
+    return getattr(exc, 'errno', None) == 1062
+
+
+def _is_transient_mysql_error(exc):
+    return getattr(exc, 'errno', None) in _TRANSIENT_MYSQL_ERRORS
+
+
+def _execute_mysql_with_retry(cur, statement, attempts=3):
+    for attempt in range(attempts):
+        try:
+            cur.execute(statement)
+            return
+        except mysc.Error as exc:
+            if not _is_transient_mysql_error(exc) or attempt == attempts - 1:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def checkexists_cached(table, indexfield, fields):
@@ -29,9 +55,10 @@ def checkexists_cached(table, indexfield, fields):
         indexfield,
         tuple(sorted(normalized.items())),
     )
-    if cache_key not in _checkexists_cache:
-        _checkexists_cache[cache_key] = checkexists(table, indexfield, dict(normalized))
-    return _checkexists_cache[cache_key]
+    with _checkexists_lock:
+        if cache_key not in _checkexists_cache:
+            _checkexists_cache[cache_key] = checkexists(table, indexfield, dict(normalized))
+        return _checkexists_cache[cache_key]
 
 
 def pgconnect(f):
@@ -95,7 +122,7 @@ def myinsert_with_cursor(cur, tablename, data):
     fields = ",".join(data.keys())
     values = "','".join([str(item).replace("'","''") for item in data.values()])
     statement = """INSERT INTO {}({}) VALUES ('{}') """.format(tablename,fields,values)
-    cur.execute(statement)
+    _execute_mysql_with_retry(cur, statement)
     cur.execute("select LAST_INSERT_ID()")
     result = cur.fetchone()
     return result[0]
@@ -932,7 +959,7 @@ def myinsert(conn,tablename,data):
     fields = ",".join(data.keys())
     values = "','".join([str(item).replace("'","''") for item in data.values()])
     statement = """INSERT INTO {}({}) VALUES ('{}') """.format(tablename,fields,values)
-    cur.execute(statement)  
+    _execute_mysql_with_retry(cur, statement)
     cur.execute("select LAST_INSERT_ID()")
     result = cur.fetchone()
     inserted_id = result[0]
@@ -1027,7 +1054,7 @@ def ingestneuron(d):
             d[item] = escapechars(d[item])
             d[item] = d[item].replace("'","''")
 
-    checkexists('archive', 'archive_name', {'archive_name': d['archive']})
+    checkexists_cached('archive', 'archive_name', {'archive_name': d['archive']})
     conn=connect()
     cur = conn.cursor()
     statement = """CALL ingest_data('{}', '{}', '{}',  '{}', '{}','{}' , '{}' , '{}','{}', '{}','{}','{}', '{}','{}', '{}', '{}', '{}', '{}', cast({} as boolean), '{}' , '{}' , '{}', {}, {},{},{}, '{}', '{}','{}', '{}', {},'{}','{}',  null)""".format(d['neuron_name'].replace("'","''"),d['archive'],d['URL_reference'],d['species'], expcondtext,d['age_classification'],d['region'],d['celltype'],d['deposition_date'],d['uploaddate'],
@@ -1044,21 +1071,24 @@ def ingestneuron(d):
 def getarticleid(conn,pmid,doi):
     """ Gets the article id for insertion.
     """
-    cur = conn.cursor()
-    if doi is not None:
-        isref = validators.url(doi)
-    else:
-        isref = False
-    if pmid > 0:
-        stmt = "SELECT DISTINCT article_id,PMID FROM neuron_article where PMID = {}".format(pmid)
-    else:
-        if isref:
-            stmt = "SELECT DISTINCT reference_article.article_id, neuron_article.PMID FROM reference_article,neuron_article where neuron_article.article_id = reference_article.article_id AND reference_article.article_URL = '{}'".format(doi)
+    with _publication_lock:
+        cur = conn.cursor()
+        if doi is not None:
+            isref = validators.url(doi)
         else:
-            stmt = "SELECT DISTINCT article_id, neuron_article.PMID FROM neuron_article, AllPublications where neuron_article.PMID = AllPublications.PMID AND AllPublications.DOI = '{}'".format(doi)
-    cur.execute(stmt)
-    res = cur.fetchone()
-    if res is None:
+            isref = False
+        if pmid > 0:
+            stmt = "SELECT DISTINCT article_id,PMID FROM neuron_article where PMID = {}".format(pmid)
+        else:
+            if isref:
+                stmt = "SELECT DISTINCT reference_article.article_id, neuron_article.PMID FROM reference_article,neuron_article where neuron_article.article_id = reference_article.article_id AND reference_article.article_URL = '{}'".format(doi)
+            else:
+                stmt = "SELECT DISTINCT article_id, neuron_article.PMID FROM neuron_article, AllPublications where neuron_article.PMID = AllPublications.PMID AND AllPublications.DOI = '{}'".format(doi)
+        cur.execute(stmt)
+        res = cur.fetchone()
+        if res is not None:
+            return (res[0],res[1])
+
         if pmid > 0:
             pmrecord = io.fetchpmarticle(str(pmid))
         else:
@@ -1105,8 +1135,6 @@ def getarticleid(conn,pmid,doi):
         res = myinsert('reference_article',refrec)
 
         return  (res,pmid)
-    else:
-        return (res[0],res[1])
 
 
 @pgconnect
@@ -1131,6 +1159,7 @@ def exportpublication(conn,oldid,neuron_id):
         'article_id': article_id,
         'PMID': newpmid
     })
+
 
 @pgconnect
 def getnneurons(conn,foldername):
@@ -1399,53 +1428,61 @@ def checkexists(conn,table,indexfield, fields):
     cur = conn.cursor()
     if res is None:
         stmt = "insert into {} ({}) values ({})".format(table,','.join(fields.keys()),"'" + "','".join(fields.values()) + "'")
-        cur.execute(stmt)
-        cur.execute('select LAST_INSERT_ID()')
-        res = cur.fetchone()
+        try:
+            _execute_mysql_with_retry(cur, stmt)
+            cur.execute('select LAST_INSERT_ID()')
+            res = cur.fetchone()
+        except mysc.IntegrityError as exc:
+            if not _is_duplicate_error(exc):
+                raise
+            res = checkindb(table,indexfield,fields)
+            if res is None:
+                raise
     return res[0]
 
 def ingestregion(adict):
     # Checks dict for region fields
     # Wraps fields into array string for postgres stored procedure
-    conn=connect()
-    cur = conn.cursor()
-    
-    proceed = True
-    path2 = ''
+    with _pg_reference_lock:
+        conn=connect()
+        cur = conn.cursor()
+        
+        proceed = True
+        path2 = ''
 
-    reg1 = adict.get('region1','')
-    if reg1 == 'Not reported' or reg1 == '':
+        reg1 = adict.get('region1','')
+        if reg1 == 'Not reported' or reg1 == '':
 
-        raise Exception('Region 1 must have value')
-    else:
-        pgarr = "array['{}'".format(reg1.replace("'","''").strip())
-        path = cleanstr(reg1)
-    reg2 = adict.get('region2','')
-    if reg2 == 'Not reported' or reg2 == '':
-        proceed = False
-    else:
-        pgarr += ",'{}'".format(reg2.replace("'","''").strip())
-        path += '.' + cleanstr(reg2)
-    reg3 = adict.get('region3','')
-    if reg3 == 'Not reported' or reg3 == '' and proceed:
-        proceed = False
-    elif proceed:
-        path += '.' + cleanstr(reg3)
-        pgarr += ",'{}'".format(reg3.replace("'","''").strip())
-    reg3B = adict.get('region3B','')
-    if reg3B == 'Not reported' or reg3B == '' and proceed:
-        pass        
-    elif proceed:
-        regarr = reg3B.split(',')
-        for item in regarr:
-            pgarr += ",'{}'".format(cleanval(item.replace("'","''").strip()))
-            path += '.' + cleanstr(item)
-    pgarr += "]"
-    cur.execute("CALL ingest_region({},'{}')".format(pgarr,path)) #TODO check if paranthesis should be here
-    cur.execute("SELECT id from region where path = '{}';".format(path))
-    theid = cur.fetchone()
-    conn.close()
-    return theid[0]
+            raise Exception('Region 1 must have value')
+        else:
+            pgarr = "array['{}'".format(reg1.replace("'","''").strip())
+            path = cleanstr(reg1)
+        reg2 = adict.get('region2','')
+        if reg2 == 'Not reported' or reg2 == '':
+            proceed = False
+        else:
+            pgarr += ",'{}'".format(reg2.replace("'","''").strip())
+            path += '.' + cleanstr(reg2)
+        reg3 = adict.get('region3','')
+        if reg3 == 'Not reported' or reg3 == '' and proceed:
+            proceed = False
+        elif proceed:
+            path += '.' + cleanstr(reg3)
+            pgarr += ",'{}'".format(reg3.replace("'","''").strip())
+        reg3B = adict.get('region3B','')
+        if reg3B == 'Not reported' or reg3B == '' and proceed:
+            pass        
+        elif proceed:
+            regarr = reg3B.split(',')
+            for item in regarr:
+                pgarr += ",'{}'".format(cleanval(item.replace("'","''").strip()))
+                path += '.' + cleanstr(item)
+        pgarr += "]"
+        cur.execute("CALL ingest_region({},'{}')".format(pgarr,path)) #TODO check if paranthesis should be here
+        cur.execute("SELECT id from region where path = '{}';".format(path))
+        theid = cur.fetchone()
+        conn.close()
+        return theid[0]
     # Strips invalid characters from path elements string.
     # Concatenates path elements into ltree path
     # Calls stored procedure to ingest region at lowest level if needed
@@ -1455,52 +1492,54 @@ def ingestregion(adict):
 def ingestcelltype(adict):
     # Checks dict for celltype fields
     # Wraps fields into array string for postgres stored procedure
-    conn=connect()
-    cur = conn.cursor()
-    
-    proceed = True
+    with _pg_reference_lock:
+        conn=connect()
+        cur = conn.cursor()
+        
+        proceed = True
 
-    reg1 = adict.get('class1','')
-    if reg1 == 'Not reported' or reg1 == '':
-        #raise Exception('class 1 must have value')
-        return 0
-    else:
-        pgarr = "array['{}'".format(reg1)
-        path = cleanstr(reg1.replace("'","''").strip())
-    reg2 = adict.get('class2','')
-    if reg2 == 'Not reported' or reg2 == '':
-        proceed = False
-    else:
-        pgarr += ",'{}'".format(reg2)
-        path += '.' + cleanstr(reg2.replace("'","''").strip())
-    reg3 = adict.get('class3','')
-    if reg3 == 'Not reported'  or reg3 == '' and proceed:
-        proceed = False
-    elif proceed:
-        path += '.' + cleanstr(reg3)
-        pgarr += ",'{}'".format(reg3.replace("'","''").strip())
-    reg3B = adict.get('class3B','')
-    if reg3B == 'Not reported'  or reg3B == '' and proceed:
-        proceed = False
-    elif proceed:
-        path += '.' + cleanstr(reg3B)
-        pgarr += ",'{}'".format(reg3B.replace("'","''").strip())
-    reg3C = adict.get('class3C','')
-    if reg3C == 'Not reported' or reg3C == '' and proceed:
-        pass        
-    elif proceed:
-        regarr = reg3C.split(',')
-        for item in regarr:
-            pgarr += ",'{}'".format(item.replace("'","''").strip())
-            path += '.' + cleanstr(item)
-    pgarr += "]"
-    cur.execute("CALL ingest_celltype({},'{}')".format(pgarr,path))
-    cur.execute("SELECT id from celltype where path = '{}';".format(path))
-    theid = cur.fetchone()
+        reg1 = adict.get('class1','')
+        if reg1 == 'Not reported' or reg1 == '':
+            #raise Exception('class 1 must have value')
+            conn.close()
+            return 0
+        else:
+            pgarr = "array['{}'".format(reg1)
+            path = cleanstr(reg1.replace("'","''").strip())
+        reg2 = adict.get('class2','')
+        if reg2 == 'Not reported' or reg2 == '':
+            proceed = False
+        else:
+            pgarr += ",'{}'".format(reg2)
+            path += '.' + cleanstr(reg2.replace("'","''").strip())
+        reg3 = adict.get('class3','')
+        if reg3 == 'Not reported'  or reg3 == '' and proceed:
+            proceed = False
+        elif proceed:
+            path += '.' + cleanstr(reg3)
+            pgarr += ",'{}'".format(reg3.replace("'","''").strip())
+        reg3B = adict.get('class3B','')
+        if reg3B == 'Not reported'  or reg3B == '' and proceed:
+            proceed = False
+        elif proceed:
+            path += '.' + cleanstr(reg3B)
+            pgarr += ",'{}'".format(reg3B.replace("'","''").strip())
+        reg3C = adict.get('class3C','')
+        if reg3C == 'Not reported' or reg3C == '' and proceed:
+            pass        
+        elif proceed:
+            regarr = reg3C.split(',')
+            for item in regarr:
+                pgarr += ",'{}'".format(item.replace("'","''").strip())
+                path += '.' + cleanstr(item)
+        pgarr += "]"
+        cur.execute("CALL ingest_celltype({},'{}')".format(pgarr,path))
+        cur.execute("SELECT id from celltype where path = '{}';".format(path))
+        theid = cur.fetchone()
 
-    conn.close()
+        conn.close()
 
-    return theid[0]
+        return theid[0]
 
 @pgconnect
 def getneuronfolder(conn,neuron_name):
