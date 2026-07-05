@@ -16,6 +16,9 @@ _publication_cache = {}
 _checkexists_lock = threading.RLock()
 _pg_reference_lock = threading.RLock()
 _publication_lock = threading.RLock()
+_workflow_session_lock = threading.RLock()
+_workflow_sessions = {}
+_workflow_session_local = threading.local()
 _TRANSIENT_MYSQL_ERRORS = {1205, 1213}
 
 
@@ -142,6 +145,132 @@ def myinsert_with_cursor(cur, tablename, data):
     cur.execute("select LAST_INSERT_ID()")
     result = cur.fetchone()
     return result[0]
+
+
+def _normalized_checkexists_fields(fields):
+    normalized = {}
+    for key, value in fields.items():
+        if value is None:
+            normalized[key] = 'Not reported'
+        elif isinstance(value, (float, int)):
+            normalized[key] = str(value)
+        else:
+            normalized[key] = str(value)
+    return normalized
+
+
+class WorkflowDBSession:
+    def __init__(self):
+        self.pg_conn = connect()
+        self.mysql_conn = mysc.connect(
+            user=cfg.dbuser,
+            password=cfg.dbpass,
+            host=cfg.dbhost,
+            database=cfg.dbsel,
+            auth_plugin=cfg.db_auth_plugin,
+        )
+        self.mysql_conn.autocommit = True
+        self.closed = False
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.pg_conn.close()
+        finally:
+            try:
+                self.mysql_conn.close()
+            except Exception:
+                pass
+
+    def pg_cursor(self, dict_cursor=False):
+        if dict_cursor:
+            return self.pg_conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+        return self.pg_conn.cursor()
+
+    def mysql_cursor(self, buffered=False, dictionary=False):
+        return self.mysql_conn.cursor(buffered=buffered, dictionary=dictionary)
+
+    def myinsert(self, tablename, data):
+        cur = self.mysql_cursor()
+        data = {item: data[item] for item in data if data[item] is not None}
+        fields = ",".join(data.keys())
+        values = "','".join([str(item).replace("'","''") for item in data.values()])
+        statement = """INSERT INTO {}({}) VALUES ('{}') """.format(tablename,fields,values)
+        _execute_mysql_with_retry(cur, statement)
+        cur.execute("select LAST_INSERT_ID()")
+        result = cur.fetchone()
+        return result[0]
+
+    def myinsert_with_cursor(self, cur, tablename, data):
+        return myinsert_with_cursor(cur, tablename, data)
+
+    def checkindb(self, table, indexfield, fields):
+        fields = dict(fields)
+        for item in fields:
+            if fields[item] is None:
+                fields[item] = 'Not reported'
+            if isinstance(fields[item],float) or isinstance(fields[item],int):
+                fields[item] = str(fields[item])
+        cur = self.mysql_cursor()
+        cur.execute("SELECT * from {} where {} = '{}'".format(table,indexfield,fields[indexfield]))
+        return cur.fetchone()
+
+    def checkexists(self, table, indexfield, fields):
+        fields = dict(fields)
+        for item in fields:
+            if isinstance(fields[item],str):
+                fields[item] = fields[item].replace("'","''")
+        res = self.checkindb(table,indexfield,fields)
+        cur = self.mysql_cursor()
+        if res is None:
+            stmt = "insert into {} ({}) values ({})".format(table,','.join(fields.keys()),"'" + "','".join(fields.values()) + "'")
+            try:
+                _execute_mysql_with_retry(cur, stmt)
+                cur.execute('select LAST_INSERT_ID()')
+                res = cur.fetchone()
+            except mysc.IntegrityError as exc:
+                if not _is_duplicate_error(exc):
+                    raise
+                res = self.checkindb(table,indexfield,fields)
+                if res is None:
+                    raise
+        return res[0]
+
+    def checkexists_cached(self, table, indexfield, fields):
+        normalized = _normalized_checkexists_fields(fields)
+        cache_key = (
+            cfg.dbsel,
+            table,
+            indexfield,
+            tuple(sorted(normalized.items())),
+        )
+        with _checkexists_lock:
+            if cache_key not in _checkexists_cache:
+                _checkexists_cache[cache_key] = self.checkexists(table, indexfield, dict(normalized))
+            return _checkexists_cache[cache_key]
+
+
+def get_workflow_session():
+    session = getattr(_workflow_session_local, 'session', None)
+    if session is not None and not session.closed:
+        return session
+    session = WorkflowDBSession()
+    _workflow_session_local.session = session
+    with _workflow_session_lock:
+        _workflow_sessions[threading.get_ident()] = session
+    return session
+
+
+def close_workflow_sessions():
+    with _workflow_session_lock:
+        sessions = list(_workflow_sessions.values())
+        _workflow_sessions.clear()
+    for session in sessions:
+        session.close()
+    if hasattr(_workflow_session_local, 'session'):
+        delattr(_workflow_session_local, 'session')
 
 
 def deletefromjson(akey,aval,jsonfile):
@@ -436,6 +565,53 @@ def exportpvec(neuron_id,oldid):
     myinsert("persistance_vector",newd)
 
 
+def exportpvec_fast(session, neuron_id, oldid):
+    cur = session.pg_cursor(dict_cursor=True)
+    cur.execute('select * from pvec where neuron_id = %s', (neuron_id,))
+    res = cur.fetchall()
+    dpvec = dict(res[0]) if res else {}
+    dpvec["Sfactor"] = dpvec.pop("sfactor")
+    del dpvec["id"]
+    dpvec["neuron_id"] = oldid
+    coeffs = dpvec["coeffs"]
+    del dpvec["coeffs"]
+    dcoeffs = {"coeff{0:0=2d}".format(i): j for (i,j) in enumerate(coeffs)}
+    newd = {**dpvec,**dcoeffs}
+    session.myinsert("persistance_vector",newd)
+
+
+def insertbrainregions_fast(session, reglist, neuron_id):
+    cur = session.mysql_cursor(buffered=True)
+    level = 0
+    for item in reglist:
+        level += 1
+        name = escapechars(item[1])
+        statement = "select id from brainRegion where name = '{}'".format(name)
+        cur.execute(statement)
+        res = cur.fetchone()  
+        if res is None:
+            brid = session.myinsert_with_cursor(cur,'brainRegion',{'name': name})
+        else:
+            brid = res[0]
+        session.myinsert_with_cursor(cur,'brainRegion_neuron',{'brainRegionLevel': level, 'brainRegionId': brid,'neuronId': neuron_id})
+
+
+def insertcelltypes_fast(session, celllist, neuron_id):
+    cur = session.mysql_cursor(buffered=True)
+    level = 0
+    for item in celllist:
+        level += 1
+        name = escapechars(item[1])
+        statement = "select id from cellType where name = '{}'".format(name)
+        cur.execute(statement)
+        res = cur.fetchone()  
+        if res is None:
+            brid = session.myinsert_with_cursor(cur,'cellType',{'name': name})
+        else:
+            brid = res[0]
+        session.myinsert_with_cursor(cur,'cellType_neuron',{'cellTypeLevel': level, 'cellTypeId': brid,'neuronId': neuron_id})
+
+
 @myconnect
 def insertbrainregions(conn,reglist,neuron_id):
     # inserts a region by checking if exists in region table and then in the connecting table 
@@ -482,6 +658,16 @@ def insertdeposition(oldid,adict):
         'upload_date': dt_string}
     myinsert('deposition',data)
 
+
+def insertdeposition_fast(session, oldid, adict):
+    now = datetime.now()
+    dt_string = now.strftime("%Y-%m-%d %H:%M:%S")
+    data = {'neuron_id': oldid,
+        'neuron_name': adict['name'],
+        'deposition_date': adict['depositiondate'],
+        'upload_date': dt_string}
+    session.myinsert('deposition',data)
+
 @pgconnect
 def inserttissueshrinkage(conn,neuron_id,oldid):
     cur = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
@@ -518,6 +704,37 @@ def inserttissueshrinkage(conn,neuron_id,oldid):
         'neuron_id': oldid
     }
     myinsert('Tissue_shrinkage',data)
+
+
+def inserttissueshrinkage_fast(session, oldid, adict):
+    typedict = {"reported and corrected": 1,
+        "reported and not corrected": 2,
+        "Not reported": 3,
+        "not applicable": 4,
+        "Not applicable": 4}
+    repdict = {"reported and corrected": 'Reported',
+        "reported and not corrected": 'Reported',
+        "Not reported": 'Not reported',
+        "not applicable": "Not applicable",
+        "Not applicable": "Not applicable"}
+    corrdict = {"reported and corrected": 'Corrected',
+        "reported and not corrected": 'Not corrected',
+        "Not reported": '',
+        "not applicable": '',
+        "Not applicable": ''}
+    data = {'neuron_name': adict['name'],
+        'shrinkage_reported': repdict[adict['shrinkage']],
+        'shrinkage_corrected': corrdict[adict['shrinkage']],
+        'reported_value': adict['shrinkagevalue_reported_value'],
+        'reported_xy': adict['shrinkagevalue_reported_xy'],
+        'reported_z': adict['shrinkagevalue_reported_z'],
+        'corrected_value': adict['shrinkagevalue_corrected_value'],
+        'corrected_xy': adict['shrinkagevalue_corrected_xy'],
+        'corrected_z': adict['shrinkagevalue_corrected_z'],
+        'shrinkage_type_id': typedict[adict['shrinkage']],
+        'neuron_id': oldid
+    }
+    session.myinsert('Tissue_shrinkage',data)
 
 @pgconnect
 def insertcompleteness(conn,neuron_id,oldid,adict):
@@ -591,6 +808,71 @@ def insertcompleteness(conn,neuron_id,oldid,adict):
     myinsert('neuron_completeness',data)
         
 
+def insertcompleteness_fast(session, structure_rows, oldid, adict):
+    morph_attr = structure_rows[0]['morph_attributes']
+    dcompl = {item['domain']: item['completeness'] for item in structure_rows}
+    data = {}
+    
+    dkeys = dcompl.keys()
+    has_soma = adict['has_soma']
+    cdict = {'Complete':2, 'Moderate': 1, 'Incomplete':0}
+    combdict = {'Complete':{'Complete': 7, 'Moderate': 6, 'Incomplete': 5},
+        'Moderate':{'Complete': 8, 'Moderate': 4, 'Incomplete': 3},
+        'Incomplete':{'Complete': 14, 'Moderate': 1, 'Incomplete':13},
+    }
+    data = {'PMID': adict['publication_pmid'],
+        'domain_id': 0,
+        'den_integrity_id': -1,
+        'ax_integrity_id': -1,
+        'den_ax_integrity_id': -1,
+        'attributes_id': 3,
+        'curated': 1,
+        'neu_integrity_id': -1,
+        'pr_integrity_id': -1
+    }
+    if 'NEU' in dkeys:
+        data['neu_integrity_id'] = cdict[dcompl['NEU']]
+        if has_soma:
+            data['domain_id'] = 9
+        else:
+            data['domain_id']  = 8
+    elif 'PR' in dkeys:
+        data['pr_integrity_id'] = cdict[dcompl['PR']]
+        if has_soma:
+            data['domain_id']  = 11
+        else:
+            data['domain_id']  = 10
+    elif 'AP' in dkeys or 'BS' in dkeys:
+        if 'AP' in dkeys:
+            data['den_integrity_id'] = cdict[dcompl['AP']]
+            if 'AX' in dkeys:
+                data['den_ax_integrity_id'] = combdict[dcompl['AP']][dcompl['AX']]
+        else:
+            data['den_integrity_id'] = cdict[dcompl['BS']]
+            if 'AX' in dkeys:
+                data['den_ax_integrity_id'] = combdict[dcompl['BS']][dcompl['AX']]
+        if 'AX' in dkeys:
+            data['ax_integrity_id'] = cdict[dcompl['AX']]
+            if has_soma:
+                data['domain_id']  = 7
+            else:
+                data['domain_id']  = 5
+        else:
+            if has_soma:
+                data['domain_id']  = 6
+            else:
+                data['domain_id']  = 4
+    else:
+        data['ax_integrity_id'] = cdict[dcompl['AX']]
+        if has_soma:
+            data['domain_id']  = 3
+        else:
+            data['domain_id']  = 1
+    data['attributes_id'] = morph_attr
+    data['neuron_id'] = oldid
+    session.myinsert('neuron_completeness',data)
+        
+
 
 @pgconnect
 def exportmeasurements(conn,neuron_id,oldid,neuron_name):
@@ -617,6 +899,37 @@ def exportmeasurements(conn,neuron_id,oldid,neuron_name):
         res2['Neuron_name'] = neuron_name 
         res2['neuron_id'] = oldid
         myinsert('measurements{}'.format(domain),res2)
+
+
+def exportmeasurements_fast(session, neuron_id, oldid, neuron_name):
+    cur = session.pg_cursor(dict_cursor=True)
+    stmt = "select measurements.* from measurements,neuron where neuron.id = %s AND neuron.summary_meas_id = measurements.id"
+    cur.execute(stmt, (neuron_id,))
+    res = cur.fetchone()
+    res2 = {item[0].upper() + item[1:]: res[item] for item in res.keys()}
+    del res2['Id']
+    res2['Neuron_name'] = neuron_name 
+    res2['neuron_id'] = oldid
+    session.myinsert('measurements',res2)
+    stmt = """select measurements.*, neuron_structure.domain, neuron_structure.completeness, neuron_structure.morph_attributes from measurements
+    INNER JOIN neuron_structure 
+    ON measurements.id = neuron_structure.measurements_id 
+    where neuron_structure.neuron_id = %s"""
+    cur.execute(stmt, (neuron_id,))
+    res = cur.fetchall()
+
+    for meas in res:
+        res2 = {
+            item[0].upper() + item[1:]: meas[item]
+            for item in meas.keys()
+            if item not in ('completeness', 'morph_attributes')
+        }
+        domain = res2.pop('Domain')
+        del res2['Id']
+        res2['Neuron_name'] = neuron_name 
+        res2['neuron_id'] = oldid
+        session.myinsert('measurements{}'.format(domain),res2)
+    return [dict(item) for item in res]
 
 @pgconnect
 def exportdetailedmeasurements(conn,neuron_id,oldid,neuron_name):
@@ -867,6 +1180,102 @@ def getneurondata(neuron_name):
     
     return item
 
+
+def _row_as_prefixed_dict(cur, table, row_id):
+    cur.execute("SELECT * from {} where {}.id = %s".format(table, table), (row_id,))
+    result = cur.fetchone()
+    if result is None:
+        return None
+    return {table + '_' + key: result[key] for key in result.keys()}
+
+
+def _myregions_from_cursor(cur, path):
+    if path is not None:
+        cur.execute("select name from region where path @> %s order by path", (path,))
+        res = cur.fetchall()
+    else:
+        res = []
+    regionlabels = ['region1','region2','region3','region3B']
+    defaultval = ['Not reported'] * 4
+    if len(regionlabels) < len(res):
+        lendiff = len(res) - len(regionlabels)
+        regionlabels = regionlabels + ['region3B'] * lendiff
+        defaultval = defaultval + ['Not reported'] * lendiff
+    result = [[a,b] for a,b in zip(regionlabels,defaultval)]
+    
+    for ix in range(len(res)):
+        result[ix][1] = res[ix][0]
+    
+    resultdict = {item[0]: item[1] for item in result if item[1]}
+    if len(res) > 3:
+        resultdict['region3B'] = res[3][0]
+
+    return { "regionlabels": result,**resultdict}
+
+
+def _mycelltypes_from_cursor(cur, path):
+    if path is not None:
+        cur.execute("select name from celltype where path @> %s order by path", (path,))
+        res = cur.fetchall()
+    else:
+        res = []
+    typelabels = ['class1','class2','class3','class3B','class3C']
+    defaultval = ['Not reported'] * 5
+    if len(typelabels) < len(res):
+        lendiff = len(res) - len(typelabels)
+        typelabels = typelabels + ['class3C'] * lendiff
+        defaultval = defaultval + ['Not reported'] * lendiff
+    result = [[a,b] for a,b in zip(typelabels,defaultval)]
+    for ix in range(len(res)):
+        result[ix][1] = res[ix][0]
+    resultdict = {item[0]: item[1] for item in result if item[1]}
+    if len(res) > 4:
+        resultdict['class3C'] = res[4][0]
+
+    return { "celltypelabels": result,**resultdict}
+
+
+def getneurondata_fast(neuron_name, session=None):
+    owns_session = session is None
+    if session is None:
+        session = WorkflowDBSession()
+    try:
+        cur = session.pg_cursor(dict_cursor=True)
+        cur.execute("SELECT neuron.* FROM neuron WHERE neuron.name = %s", (neuron_name,))
+        res = cur.fetchall()
+        item = dict(res[0])
+
+        archive_id = item['archive_id']
+        item = {**item, **_row_as_prefixed_dict(cur, 'archive', archive_id)}
+
+        region_id = item['region_id']
+        if region_id is None:
+            item = {**item, **{'region_path': None}}
+        else:
+            item = {**item, **_row_as_prefixed_dict(cur, 'region', region_id)}
+        item = {**item, **_myregions_from_cursor(cur, item['region_path'])}
+
+        celltype_id = item['celltype_id']
+        if celltype_id is None:
+            item = {**item, **{'celltype_path': None}}
+        else:
+            item = {**item, **_row_as_prefixed_dict(cur, 'celltype', celltype_id)}
+        item = {**item, **_mycelltypes_from_cursor(cur, item['celltype_path'])}
+
+        item = {**item, **_row_as_prefixed_dict(cur, 'publication', item['publication_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'expcond', item['expcond_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'measurements', item['summary_meas_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'originalformat', item['originalformat_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'staining', item['staining_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'shrinkagevalue', item['shrinkagevalue_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'strain', item['strain_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'species', item['strain_species_id'])}
+        item = {**item, **_row_as_prefixed_dict(cur, 'expcond', item['expcond_id'])}
+        return item
+    finally:
+        if owns_session:
+            session.close()
+
 def getallreadydata():
     # gets all ready neurons
     # prepares full dict for neuron, including measurements, shrinkage, region  pvec
@@ -1083,21 +1492,27 @@ def ingestneuron(d):
     conn.close()
     return neuron_id
 
-def getarticleid(pmid,doi):
+def getarticleid(pmid,doi, session=None):
     """ Gets the article id for insertion.
     """
     cache_key = (cfg.dbsel, str(pmid), str(doi or ''))
     with _publication_lock:
         if cache_key in _publication_cache:
             return _publication_cache[cache_key]
-        conn = mysc.connect(
-            user=cfg.dbuser,
-            password=cfg.dbpass,
-            host=cfg.dbhost,
-            database=cfg.dbsel,
-            auth_plugin=cfg.db_auth_plugin,
-        )
-        conn.autocommit = True
+        owns_conn = session is None
+        if session is None:
+            conn = mysc.connect(
+                user=cfg.dbuser,
+                password=cfg.dbpass,
+                host=cfg.dbhost,
+                database=cfg.dbsel,
+                auth_plugin=cfg.db_auth_plugin,
+            )
+            conn.autocommit = True
+            insert_publication = myinsert
+        else:
+            conn = session.mysql_conn
+            insert_publication = session.myinsert
         cur = conn.cursor()
         try:
             if doi is not None:
@@ -1153,7 +1568,7 @@ def getarticleid(pmid,doi):
                 }
                 if isref:
                     del pubrec['DOI']
-                myinsert('AllPublications', pubrec)
+                insert_publication('AllPublications', pubrec)
             refrec = pmrecord
             del refrec["first_author"] 
             del refrec["last_author"] 
@@ -1161,13 +1576,14 @@ def getarticleid(pmid,doi):
             del refrec["doi"] 
             del refrec["year"]
             
-            res = myinsert('reference_article',refrec)
+            res = insert_publication('reference_article',refrec)
 
             result = (res,pmid)
             _publication_cache[cache_key] = result
             return result
         finally:
-            conn.close()
+            if owns_conn:
+                conn.close()
 
 
 @pgconnect
@@ -1192,6 +1608,25 @@ def exportpublication(conn,oldid,neuron_id):
         'article_id': article_id,
         'PMID': newpmid
     })
+
+
+def exportpublication_fast(session, oldid, item):
+    pmid = item['publication_pmid']
+    doi = item['publication_doi']
+    
+    (article_id, newpmid) = getarticleid(pmid,doi, session=session)
+
+    session.myinsert('neuron_article',{
+        'neuron_id': oldid,
+        'article_id': article_id,
+        'PMID': newpmid
+    })
+
+
+def updateneuronstatus_fast(session, neuron_name, status, message=''):
+    cur = session.pg_cursor()
+    stmt = "UPDATE ingestion set status = '{}', message = '{}' where neuron_name = '{}'".format(status,message,neuron_name.replace("'","''"))
+    cur.execute(stmt)
 
 
 @pgconnect

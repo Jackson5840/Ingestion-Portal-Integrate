@@ -1619,6 +1619,7 @@ class DuplicateException(Exception):
 
 def exporttomain(foldername, progress_cb=None, should_stop=None):
     archive = namefromfolder(foldername)
+    com.close_workflow_sessions()
     com.clear_workflow_caches()
     (resultnames, resultids) = com.getarchiveneurons(archive, skip_public=True)
     total = len(resultnames)
@@ -1906,31 +1907,32 @@ def publishtweets(version,nneurons,archivename,neuron_name,folders):
     #     api.create_tweet(text=message,)
 
 
-def exportneuron(neuron_name):
+def exportneuron(neuron_name, folder_name=None):
 
-    item = com.getneurondata(neuron_name)
-    myitem = mapneuronfields(item)
-    oldid = com.myinsert('neuron',myitem)
-    com.insertbrainregions(item["regionlabels"],oldid)
-    com.insertcelltypes(item['celltypelabels'],oldid)
-    com.exportmeasurements(item['id'],oldid,item['name'])
+    session = com.get_workflow_session()
+    item = com.getneurondata_fast(neuron_name, session=session)
+    myitem = mapneuronfields(item, session=session)
+    oldid = session.myinsert('neuron',myitem)
+    com.insertbrainregions_fast(session, item["regionlabels"],oldid)
+    com.insertcelltypes_fast(session, item['celltypelabels'],oldid)
+    structure_rows = com.exportmeasurements_fast(session, item['id'],oldid,item['name'])
     #com.exportdetailedmeasurements(item['id'],oldid,item['name'])
-    com.insertdeposition(oldid,item)
-    com.insertcompleteness(item['id'],oldid,item)
-    com.inserttissueshrinkage(item['id'],oldid)
-    com.myinsert('file',{
+    com.insertdeposition_fast(session, oldid,item)
+    com.insertcompleteness_fast(session, structure_rows,oldid,item)
+    com.inserttissueshrinkage_fast(session, oldid,item)
+    session.myinsert('file',{
         'neuron_id': oldid,
         'filename': neuron_name,
         'type': 'swc'
     })
-    com.exportpublication(oldid,item['id'])
-    com.exportpvec(item["id"],oldid)
+    com.exportpublication_fast(session, oldid,item)
+    com.exportpvec_fast(session, item["id"],oldid)
     if cfg.sshdir == cfg.sshreviewdir:
-        transferneuronfiles(neuron_name)
+        transferneuronfiles(neuron_name, foldername=folder_name, archive=item['archive_name'])
     status = 'success'
     neuronstatus = 'ingested'
     message = 'Neuron exported successfully'
-    com.updateneuronstatus(neuron_name,neuronstatus,message)
+    com.updateneuronstatus_fast(session, neuron_name,neuronstatus,message)
     return {
         'status': status,
         'message': message
@@ -1964,7 +1966,7 @@ def checkduplicates(neuron_id):
         raise DuplicateException("Duplicate of neuron: {}".format(resd["similar_neuron_ids"]['1']["neuron_id"]))
 
 
-def transferneuronfiles(neuron_name):
+def transferneuronfiles(neuron_name, foldername=None, archive=None):
     def checkdir(path):
         # Check if a directory exists, if not create it either local or remote
         if islocal:
@@ -1974,8 +1976,10 @@ def transferneuronfiles(neuron_name):
                 sftp.chdir(path)
             except IOError as e:
                 sftp.mkdir(path)
-    foldername = com.getneuronfolder(neuron_name)
-    archive = namefromfolder(foldername)
+    if foldername is None:
+        foldername = com.getneuronfolder(neuron_name)
+    if archive is None:
+        archive = namefromfolder(foldername)
     if not islocal:
         sftp = create_sftp_client(cfg.sshhost)
     datadir = cfg.sshdir + 'dableFiles/' + archive.lower() + '/'
@@ -2097,32 +2101,37 @@ def transfergif(neuron_name):
         sftp.close()
         sftp.sshclient.close()
         
-def mapneuronfields(pgdict):
+def mapneuronfields(pgdict, session=None):
+    def checkexists(table, indexfield, fields):
+        if session is not None:
+            return session.checkexists_cached(table, indexfield, fields)
+        return com.checkexists_cached(table, indexfield, fields)
+
     archdict = {'archive_name': pgdict['archive_name'], 
         'archive_URL': pgdict['archive_url']}
-    archive_id = com.checkexists_cached('archive','archive_name', archdict)
-    species_id = com.checkexists_cached('species','species', {'species': pgdict['species_name']})
-    strain_id = com.checkexists_cached('animal_strain','strain_name', {'strain_name': pgdict['strain_name']})
-    format_id = com.checkexists_cached('original_format','original_format', {
+    archive_id = checkexists('archive','archive_name', archdict)
+    species_id = checkexists('species','species', {'species': pgdict['species_name']})
+    strain_id = checkexists('animal_strain','strain_name', {'strain_name': pgdict['strain_name']})
+    format_id = checkexists('original_format','original_format', {
         'original_format': pgdict['reconstruction'] + '.' + pgdict['originalformat_name']})
-    protocol_id = com.checkexists_cached('protocol_design','protocol', {'protocol': pgdict['protocol']})
-    thickness_id = com.checkexists_cached('slicing_thickness','slice_thickness', {'slice_thickness': pgdict['slicingthickness']})
-    slice_direction_id = com.checkexists_cached('slicing_direction','slicing_direction', {'slicing_direction': pgdict['slicing_direction']})
-    stain_id = com.checkexists_cached('staining_method','stain', {'stain': pgdict['staining_name']})
-    magnification_id = com.checkexists_cached('magnification','magnification', {'magnification': pgdict['magnification']})
-    objective_id = com.checkexists_cached('objective_type','objective_type', {'objective_type': pgdict['objective']})
-    reconstruction_id = com.checkexists_cached('reconstruction','reconstruction_software', {'reconstruction_software': pgdict['reconstruction']})
-    age_classification_id = com.checkexists_cached('age_classification','age_class', {'age_class': pgdict['age']})
-    expercond_id = com.checkexists_cached('experimentcondition','expercond', {'expercond': pgdict['expcond_name']})
-    region1_id = com.checkexists_cached('neuron_region1','region1', {'region1': pgdict['region1']})
-    region2_id = com.checkexists_cached('neuron_region2','region2', {'region2': pgdict['region2']})
-    region3_id = com.checkexists_cached('neuron_region3','region3', {'region3': pgdict['region3']})
-    region3B_id = com.checkexists_cached('neuron_region3','region3', {'region3': pgdict['region3B']})
-    class1_id = com.checkexists_cached('neuron_class1','class1', {'class1': pgdict['class1']})
-    class2_id = com.checkexists_cached('neuron_class2','class2', {'class2': pgdict['class2']})
-    class3_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3']})
-    class3B_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3B']})
-    class3C_id = com.checkexists_cached('neuron_class3','class3', {'class3': pgdict['class3C']})
+    protocol_id = checkexists('protocol_design','protocol', {'protocol': pgdict['protocol']})
+    thickness_id = checkexists('slicing_thickness','slice_thickness', {'slice_thickness': pgdict['slicingthickness']})
+    slice_direction_id = checkexists('slicing_direction','slicing_direction', {'slicing_direction': pgdict['slicing_direction']})
+    stain_id = checkexists('staining_method','stain', {'stain': pgdict['staining_name']})
+    magnification_id = checkexists('magnification','magnification', {'magnification': pgdict['magnification']})
+    objective_id = checkexists('objective_type','objective_type', {'objective_type': pgdict['objective']})
+    reconstruction_id = checkexists('reconstruction','reconstruction_software', {'reconstruction_software': pgdict['reconstruction']})
+    age_classification_id = checkexists('age_classification','age_class', {'age_class': pgdict['age']})
+    expercond_id = checkexists('experimentcondition','expercond', {'expercond': pgdict['expcond_name']})
+    region1_id = checkexists('neuron_region1','region1', {'region1': pgdict['region1']})
+    region2_id = checkexists('neuron_region2','region2', {'region2': pgdict['region2']})
+    region3_id = checkexists('neuron_region3','region3', {'region3': pgdict['region3']})
+    region3B_id = checkexists('neuron_region3','region3', {'region3': pgdict['region3B']})
+    class1_id = checkexists('neuron_class1','class1', {'class1': pgdict['class1']})
+    class2_id = checkexists('neuron_class2','class2', {'class2': pgdict['class2']})
+    class3_id = checkexists('neuron_class3','class3', {'class3': pgdict['class3']})
+    class3B_id = checkexists('neuron_class3','class3', {'class3': pgdict['class3B']})
+    class3C_id = checkexists('neuron_class3','class3', {'class3': pgdict['class3C']})
 
 
     

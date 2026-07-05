@@ -220,7 +220,7 @@ def _ingest_archive_neuron(folder_name, neuron, neurontometa, neurontomeas, neur
         
         _time_stage(timings, 'pg_insert_domains', com.ingestdomain, neuron_id, ndomains, morpho_attr, detmeas_ids)
         _time_stage(timings, 'pg_import_pvec', io.importpvec, neuron_id, neuron_name, folder_name)
-        _time_stage(timings, 'export_review_mysql_tomcat', io.exportneuron, neuron_name)
+        _time_stage(timings, 'export_review_mysql_tomcat', io.exportneuron, neuron_name, folder_name)
         timings['total'] = round(time.perf_counter() - total_started, 4)
         logging.info("Ingest timing %s: %s", neuron_name, _format_stage_timings(timings))
         return neuron_name, {
@@ -253,6 +253,7 @@ def _neuron_progress_message(counter, total, neuron_name, neuron_result):
 def ingestarchive(folder_name, progress_cb=None, should_stop=None, threads=1):
     # select all neurons with status ready from an archive and ingest them
     threads = _sanitize_ingest_threads(threads)
+    com.close_workflow_sessions()
     com.clear_workflow_caches()
     r = redis.Redis(
         host=os.getenv('REDIS_HOST', 'localhost'),

@@ -198,15 +198,21 @@ Read Archive -> Ingest Archive -> review in Tomcat -> Export to main
 - Ensures MySQL `archive` row exists before calling the ingest stored procedure.
 - Caches repeated region/celltype/publication lookups inside each workflow and retries transient MySQL insert deadlocks.
 - Writes per-neuron stage timing into `app.log`; progress log shows total time and slowest stage.
+- Review export uses a fast `getneurondata` path and per-thread workflow DB sessions, reducing Postgres lookups from 15 connections to 1 for that read path.
 - Copies neuron files to the review Tomcat webapp.
 
 Kummer benchmark from this environment:
 
 ```text
-81 neurons in about 50 seconds
-about 0.62 seconds per neuron
-200,000 neurons ideal estimate: about 34 hours before large-run slowdown
+Kummer has 81 neurons.
+Validated with Revert Kummer -> Read Kummer -> Ingest Kummer.
+Threads 1: 30.76 seconds
+Threads 4: 22.15 seconds
+Threads 8: 20.61 seconds
+All three runs matched the pre-optimization logical data baseline with diff_count=0.
 ```
+
+The current bottleneck is still usually `export_review_mysql_tomcat`, but fast review export reduced that stage from roughly `0.34s/neuron` to about `0.10-0.13s/neuron` on Kummer.
 
 ## Revert Archive
 

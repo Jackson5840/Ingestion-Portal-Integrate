@@ -158,6 +158,7 @@ def _run_ingest_archive_job(folder_name, threads=1):
         logging.exception("Error during background ingest of archive {}".format(folder_name))
         _set_archive_job(job_type, folder_name, message='Ingest failed for {}'.format(folder_name), status='error')
     finally:
+        com.close_workflow_sessions()
         _release_archive_workflow_lock(job_type, folder_name)
 
 
@@ -194,6 +195,7 @@ def _run_export_to_main_job(archive):
         logging.exception("Error during background export to main site of archive {}".format(archive))
         _set_archive_job(job_type, archive, message='Export to main failed for {}'.format(archive), status='error')
     finally:
+        com.close_workflow_sessions()
         cfg.sshdir = cfg.sshreviewdir
         cfg.dbsel = cfg.dbselrev
         _release_archive_workflow_lock(job_type, archive)
