@@ -46,6 +46,7 @@ Archive export root: /home/kira/app/Ingestion/dataexport
 Major Release root: /home/kira/app/Ingestion/MajorRelease
 Major Release JSP: /home/kira/app/Ingestion/MajorRelease/statistics.jsp
 Review Tomcat webapp: /home/kira/app/Ingestion/data/apache-tomcat-9.0.118/webapps/neuroMorphoReview
+Main Tomcat webapp: /home/kira/app/Ingestion/data/apache-tomcat-9.0.118/webapps/neuroMorpho
 ```
 
 Mac defaults in `docker-compose-macos.yml`:
@@ -66,6 +67,7 @@ data/NMOV8.7-metadata/
 data/archives/
 data/metadata/
 data/apache-tomcat-9.0.118/webapps/neuroMorphoReview/
+data/apache-tomcat-9.0.118/webapps/neuroMorpho/
 ```
 
 ## Startup
@@ -236,7 +238,65 @@ It does not replace `Revert from main`. If an archive has been exported to the m
 
 `Export to main` is also a background workflow with progress, stop, and resume-style behavior. It copies review files toward the main webapp root, exports neurons to the main DB, updates upload dates, and generates release JSP/info files.
 
-Important note: Solr/Tomcat main publishing may require manual deployment/server-specific steps. Inspect current code and the target server before giving final production instructions.
+Live main webapp destination:
+
+```text
+/home/kira/app/Ingestion/data/apache-tomcat-9.0.118/webapps/neuroMorpho
+```
+
+`cfg.sshmaindir` should point to that Tomcat 9 path. The old path below can exist as a compatibility/stale copy, but should not be treated as live unless Tomcat config proves it:
+
+```text
+/home/kira/app/Ingestion/data/tomcat/neuroMorpho
+```
+
+Main files written or updated by the workflow include:
+
+```text
+dableFiles/<archive_lower>/
+images/imageFiles/<Archive>/
+rotatingImages/<neuron>.CNG.gif
+acknowl.jsp
+Header.jsp
+WIN.jsp
+xml/archive_swc.xml
+xml/archive_all.xml
+```
+
+The backend path is:
+
+```text
+are-repo/app.py::_run_export_to_main_job
+are-repo/are/io.py::mainrelease
+are-repo/are/io.py::genwinjsp
+are-repo/are/io.py::updateinfo
+```
+
+`io.mainworkflow()` is currently commented out in `app.py`, so Solr/Tomcat production publishing may require manual deployment/server-specific steps. Inspect current code and the target server before giving final production instructions.
+
+Header/WIN debug check:
+
+```bash
+curl -s http://localhost:8080/neuroMorpho/WIN.jsp | rg "Released:|What's new in version" | head
+rg -n "Released:|What's new in version" /home/kira/app/Ingestion/data/apache-tomcat-9.0.118/webapps/neuroMorpho/Header.jsp /home/kira/app/Ingestion/data/apache-tomcat-9.0.118/webapps/neuroMorpho/WIN.jsp
+docker compose exec postgres psql -U nmo -d nmo -c "select id, major, minor, patch, active from pubversion order by id desc limit 12;"
+```
+
+Known July 2026 caveat: after testing `Revert from main`, Postgres active `pubversion` was left at `8.6.116`, while the live main Tomcat JSP files were restored to `8.6.120 - Released: 2026-06-01 - Content: 297676 cells`. If future Export to main regenerates Header/WIN, reconcile the DB version state first.
+
+## Revert From Main
+
+`Revert from main` is intended to roll back the selected archive from main plus review/staging. It should:
+
+- Roll back `version` and `pubversion`.
+- Delete the archive's main MySQL rows.
+- Delete main Tomcat archive files under `dableFiles`, `images/imageFiles`, and `rotatingImages`.
+- Remove the archive entry from `WIN.jsp`.
+- Remove the archive from main XML indexes.
+- Update `Header.jsp` and ticker tape from current `pubversion`.
+- Then run the normal review/staging `Revert Archive`.
+
+After using it, always verify both Tomcat files and DB version state.
 
 ## Import Full DB
 

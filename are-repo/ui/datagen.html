@@ -6,7 +6,7 @@
         <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
         <meta name="description" content="" />
         <meta name="author" content="" />
-        <title>GIF from Folder - NeuroMorpho Admin</title>
+        <title>DataGEN - NeuroMorpho Admin</title>
         <link href="css/styles.css" rel="stylesheet" />
         <link href="https://cdn.datatables.net/1.10.20/css/dataTables.bootstrap4.min.css" rel="stylesheet" crossorigin="anonymous" />
         <link rel="icon" type="image/x-icon" href="assets/img/favicon.png" />
@@ -30,22 +30,6 @@
                             <div>
                                 <div class="small text-gray-500">Documentation</div>
                                 Usage instructions and reference
-                            </div></a
-                        >
-                        <div class="dropdown-divider m-0"></div>
-                        <a class="dropdown-item py-3" href="https://docs.startbootstrap.com/sb-admin-pro/components" target="_blank"
-                            ><div class="icon-stack bg-primary-soft text-primary mr-4"><i data-feather="code"></i></div>
-                            <div>
-                                <div class="small text-gray-500">Components</div>
-                                Code snippets and reference
-                            </div></a
-                        >
-                        <div class="dropdown-divider m-0"></div>
-                        <a class="dropdown-item py-3" href="https://docs.startbootstrap.com/sb-admin-pro/changelog" target="_blank"
-                            ><div class="icon-stack bg-primary-soft text-primary mr-4"><i data-feather="file-text"></i></div>
-                            <div>
-                                <div class="small text-gray-500">Changelog</div>
-                                Updates and changes
                             </div></a
                         >
                     </div>
@@ -80,12 +64,12 @@
                             <div class="collapse show" id="collapseDashboards" data-parent="#accordionSidenav">
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="index.html">Ingestion process</a></nav>
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="gifgen.html">Gif generation</a></nav>
-                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link active" href="giffile.html">GIFFILE</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="giffile.html">GIFFILE</a></nav>
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="topvec.html">TOPVEC</a></nav>
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="duplicates.html">Duplicate detection</a></nav>
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="tweet.html">Tweet</a></nav>
                                 <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="major-release.html">Major Release</a></nav>
-                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link" href="datagen.html">DataGEN</a></nav>
+                                <nav class="sidenav-menu-nested nav accordion" id="accordionSidenavPages"><a class="nav-link active" href="datagen.html">DataGEN</a></nav>
                             </div>
                         </div>
                     </div>
@@ -97,44 +81,72 @@
                         <div class="container-fluid">
                             <div class="page-header-content">
                                 <h1 class="page-header-title">
-                                    <div class="page-header-icon"><i data-feather="film"></i></div>
-                                    <span>GIFFILE</span>
+                                    <div class="page-header-icon"><i data-feather="database"></i></div>
+                                    <span>DataGEN</span>
                                 </h1>
-                                <div class="page-header-subtitle">Generate GIFs from a folder of SWC files</div>
+                                <div class="page-header-subtitle">Generate release CSV files from xlsx manifests</div>
                             </div>
                         </div>
                     </div>
                     <div class="container-fluid mt-n10">
-                        <div class="card">
-                            <div class="card-header">Generate GIFs from SWC folder</div>
-                            <div class="card-body">
-                                <div class="form-group">
-                                    <label for="swcdir">SWC folder path (absolute path on server)</label>
-                                    <div class="input-group">
-                                        <input type="text" class="form-control" id="swcdir" placeholder="/path/to/swc/files" onblur="this.value=toWslPath(this.value)" />
-                                        <div class="input-group-append">
-                                            <label class="btn btn-outline-primary mb-0" for="swcdir_picker">Choose folder</label>
+                        <div class="row">
+                            <div class="col-xl-6 mb-4">
+                                <div class="card h-100">
+                                    <div class="card-header">MeasurementGEN</div>
+                                    <div class="card-body">
+                                        <div class="form-group">
+                                            <label for="measurement_xlsx">Measurements xlsx</label>
+                                            <input class="form-control-file" id="measurement_xlsx" type="file" accept=".xlsx" />
                                         </div>
+                                        <div class="form-group">
+                                            <label for="measurement_outputdir">Output folder path</label>
+                                            <input class="form-control" id="measurement_outputdir" type="text" placeholder="/mnt/c/Users/Star/Desktop/DataGEN-output" onblur="this.value=toWslPath(this.value)" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="measurement_database">Database</label>
+                                            <select class="form-control" id="measurement_database">
+                                                <option value="main" selected>Main NeuMO</option>
+                                                <option value="review">Review nmdbDev</option>
+                                            </select>
+                                        </div>
+                                        <button class="btn btn-primary" id="measurement_btn" onclick="startDataGEN('measurement')">Run MeasurementGEN</button>
+                                        <div id="measurement_status" class="mt-3"></div>
+                                        <div class="progress mt-2" id="measurement_progress_wrap" style="display:none; height:20px;">
+                                            <div id="measurement_pbar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width:0%" aria-valuemin="0" aria-valuemax="100">0%</div>
+                                        </div>
+                                        <div id="measurement_progress_text" class="small text-muted mt-1"></div>
+                                        <pre id="measurement_log" class="small bg-light border rounded mt-2 p-2" style="display:none; max-height:220px; overflow:auto; white-space:pre-wrap;"></pre>
                                     </div>
-                                    <input type="file" id="swcdir_picker" webkitdirectory directory multiple style="display:none;" onchange="setFolderFromPicker(this, 'swcdir')" />
                                 </div>
-                                <div class="form-group">
-                                    <label for="outputdir">Output folder path (absolute path on server)</label>
-                                    <input type="text" class="form-control" id="outputdir" placeholder="/home/kira/app/Ingestion/data/output/gifs" onblur="this.value=toWslPath(this.value)" />
+                            </div>
+                            <div class="col-xl-6 mb-4">
+                                <div class="card h-100">
+                                    <div class="card-header">MetadataGEN</div>
+                                    <div class="card-body">
+                                        <div class="form-group">
+                                            <label for="metadata_xlsx">Metadata xlsx</label>
+                                            <input class="form-control-file" id="metadata_xlsx" type="file" accept=".xlsx" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="metadata_outputdir">Output folder path</label>
+                                            <input class="form-control" id="metadata_outputdir" type="text" placeholder="/mnt/c/Users/Star/Desktop/DataGEN-output" onblur="this.value=toWslPath(this.value)" />
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="metadata_database">Database</label>
+                                            <select class="form-control" id="metadata_database">
+                                                <option value="main" selected>Main NeuMO</option>
+                                                <option value="review">Review nmdbDev</option>
+                                            </select>
+                                        </div>
+                                        <button class="btn btn-primary" id="metadata_btn" onclick="startDataGEN('metadata')">Run MetadataGEN</button>
+                                        <div id="metadata_status" class="mt-3"></div>
+                                        <div class="progress mt-2" id="metadata_progress_wrap" style="display:none; height:20px;">
+                                            <div id="metadata_pbar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width:0%" aria-valuemin="0" aria-valuemax="100">0%</div>
+                                        </div>
+                                        <div id="metadata_progress_text" class="small text-muted mt-1"></div>
+                                        <pre id="metadata_log" class="small bg-light border rounded mt-2 p-2" style="display:none; max-height:220px; overflow:auto; white-space:pre-wrap;"></pre>
+                                    </div>
                                 </div>
-                                <div class="form-group">
-                                    <label for="threads">Threads</label>
-                                    <input type="number" class="form-control" id="threads" min="1" max="32" value="12" />
-                                </div>
-                                <button class="btn btn-primary" id="giffile_btn" onclick="giffileStart(false)">Generate GIFs</button>
-                                <button class="btn btn-outline-primary ml-2" id="giffile_resume_btn" onclick="giffileStart(true)">Resume</button>
-                                <button class="btn btn-outline-danger ml-2" id="giffile_stop_btn" onclick="giffileStop()" disabled>Stop</button>
-                                <div id="giffile_status" class="mt-3"></div>
-                                <div class="progress mt-2" id="giffile_progress_wrap" style="display:none; height:20px;">
-                                    <div id="giffile_pbar" class="progress-bar progress-bar-striped progress-bar-animated bg-success" role="progressbar" style="width:0%" aria-valuemin="0" aria-valuemax="100">0%</div>
-                                </div>
-                                <div id="giffile_progress_text" class="small text-muted mt-1"></div>
-                                <pre id="giffile_log" class="small bg-light border rounded mt-2 p-2" style="display:none; max-height:220px; overflow:auto; white-space:pre-wrap;"></pre>
                             </div>
                         </div>
                     </div>
@@ -156,6 +168,6 @@
         <script src="https://code.jquery.com/jquery-3.4.1.min.js" crossorigin="anonymous"></script>
         <script src="https://stackpath.bootstrapcdn.com/bootstrap/4.3.1/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
         <script src="js/scripts.js"></script>
-        <script src="js/giffile.js"></script>
+        <script src="js/datagen.js"></script>
     </body>
 </html>

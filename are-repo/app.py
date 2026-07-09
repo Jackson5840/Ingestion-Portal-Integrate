@@ -16,7 +16,7 @@ import ipaddress
 import uuid
 from collections import defaultdict
 from threading import Thread
-from are import cfg,io,com,utils,ingest,ingestdiameter
+from are import cfg,io,com,utils,ingest,ingestdiameter,datagen
 #from IngestApp import Ingestion
 
 
@@ -41,6 +41,17 @@ def _decode_redis(value, default=''):
     if value is None:
         return default
     return value
+
+
+def normalize_server_path(path_value):
+    path_value = (path_value or '').strip().strip('"').strip("'")
+    m = re.match(r'^\\\\wsl\.localhost\\[^\\]+\\(.*)', path_value)
+    if m:
+        return '/' + m.group(1).replace('\\', '/')
+    m = re.match(r'^([A-Za-z]):[\\\/](.*)', path_value)
+    if m:
+        return '/mnt/' + m.group(1).lower() + '/' + m.group(2).replace('\\', '/')
+    return path_value
 
 
 def _set_archive_job(job_type, archive, current=None, total=None, message=None, status=None):
@@ -226,6 +237,44 @@ def _run_export_to_main_job(archive, threads=1):
         cfg.sshdir = cfg.sshreviewdir
         cfg.dbsel = cfg.dbselrev
         _release_archive_workflow_lock(job_type, archive)
+
+
+def _run_datagen_job(job_id, generator_type, xlsx_path, outputdir, upload_root, database):
+    job_type = 'datagen'
+
+    def progress_cb(current, total, message, status='running'):
+        _set_archive_job(job_type, job_id, current=current, total=total, message=message, status=status)
+
+    try:
+        progress_cb(0, 0, 'Reading xlsx for {}'.format(generator_type))
+        if generator_type == 'MeasurementGEN':
+            result = datagen.generate_measurements(xlsx_path, outputdir, progress_cb=progress_cb, database=database)
+        elif generator_type == 'MetadataGEN':
+            result = datagen.generate_metadata(xlsx_path, outputdir, progress_cb=progress_cb, database=database)
+        else:
+            raise ValueError('Invalid DataGEN type: {}'.format(generator_type))
+        status = 'success' if result.get('status') == 'success' else 'warning'
+        current_state = _get_archive_job(job_type, job_id)
+        _set_archive_job(
+            job_type,
+            job_id,
+            current=current_state['total'],
+            total=current_state['total'],
+            message='{} complete: generated {}, missing {}, failed {}. Output: {}'.format(
+                generator_type,
+                result.get('generated', 0),
+                result.get('missing', 0),
+                result.get('failed', 0),
+                '{} ({})'.format(outputdir, database),
+            ),
+            status=status,
+        )
+        r.set(_job_key(job_type, job_id, 'result'), json.dumps(result))
+    except Exception as exc:
+        logging.exception('DataGEN job failed: %s', job_id)
+        _set_archive_job(job_type, job_id, message='{} failed: {}'.format(generator_type, exc), status='error')
+    finally:
+        shutil.rmtree(upload_root, ignore_errors=True)
 
 
 @app.route('/', methods=['GET'])
@@ -1104,6 +1153,70 @@ def download_hit_log_result(filename):
         )),
     )
     return send_from_directory(output_root, filename, as_attachment=True)
+
+
+@app.route('/datagen/generate/<string:generator_type>', methods=['POST'])
+def generate_datagen(generator_type):
+    normalized_type = {
+        'measurement': 'MeasurementGEN',
+        'measurementgen': 'MeasurementGEN',
+        'measurements': 'MeasurementGEN',
+        'metadata': 'MetadataGEN',
+        'metadatagen': 'MetadataGEN',
+    }.get(generator_type.lower())
+    if normalized_type is None:
+        return jsonify({'status': 'error', 'message': 'Invalid DataGEN type.'}), 400
+
+    uploaded = request.files.get('xlsx')
+    if uploaded is None or not uploaded.filename:
+        return jsonify({'status': 'error', 'message': 'Choose an xlsx file first.'}), 400
+    if not uploaded.filename.lower().endswith('.xlsx'):
+        return jsonify({'status': 'error', 'message': 'Input file must be .xlsx.'}), 400
+
+    outputdir = normalize_server_path(request.form.get('outputdir', ''))
+    if not outputdir:
+        return jsonify({'status': 'error', 'message': 'Output folder is required.'}), 400
+    if not os.path.isabs(outputdir):
+        return jsonify({'status': 'error', 'message': 'Output folder must be an absolute server path.'}), 400
+
+    db_target = (request.form.get('database') or 'main').strip().lower()
+    if db_target == 'review':
+        database = cfg.dbselrev
+    elif db_target == 'main':
+        database = cfg.dbselmain
+    else:
+        return jsonify({'status': 'error', 'message': 'Database must be main or review.'}), 400
+
+    run_id = uuid.uuid4().hex[:12]
+    upload_root = os.path.join(tempfile.gettempdir(), 'are_datagen_uploads', run_id)
+    os.makedirs(upload_root, exist_ok=True)
+    xlsx_path = os.path.join(upload_root, os.path.basename(uploaded.filename.replace('\\', '/')))
+    uploaded.save(xlsx_path)
+
+    job_id = '{}_{}'.format(normalized_type, run_id)
+    _prepare_archive_job('datagen', job_id, 'Starting {}'.format(normalized_type))
+    r.set(_job_key('datagen', job_id, 'outputdir'), outputdir)
+    r.set(_job_key('datagen', job_id, 'type'), normalized_type)
+    r.set(_job_key('datagen', job_id, 'database'), database)
+    thread = Thread(target=_run_datagen_job, args=(job_id, normalized_type, xlsx_path, outputdir, upload_root, database))
+    thread.daemon = True
+    thread.start()
+    return jsonify({'status': 'started', 'job_id': job_id, 'type': normalized_type, 'outputdir': outputdir, 'database': database})
+
+
+@app.route('/datagen/status/<string:job_id>', methods=['GET'])
+def datagen_status(job_id):
+    state = _get_archive_job('datagen', job_id)
+    result = r.get(_job_key('datagen', job_id, 'result'))
+    if result:
+        try:
+            state['result'] = json.loads(_decode_redis(result))
+        except Exception:
+            state['result'] = {}
+    state['outputdir'] = _decode_redis(r.get(_job_key('datagen', job_id, 'outputdir')), '')
+    state['type'] = _decode_redis(r.get(_job_key('datagen', job_id, 'type')), '')
+    state['database'] = _decode_redis(r.get(_job_key('datagen', job_id, 'database')), '')
+    return jsonify(state)
 
 
 @app.route('/gifgen_folder', methods=['POST'])
